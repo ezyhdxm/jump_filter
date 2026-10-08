@@ -2,6 +2,7 @@
 # SETUP LOGIC: Browser dependencies are loaded only by this optional application.
 from dataclasses import asdict
 from hashlib import sha256
+from html import escape
 from io import BytesIO
 import json
 import numpy as np
@@ -15,10 +16,55 @@ from jump_filter.plots import METHOD_LABELS, trade_figure, diagnostic_figure, co
 # UI LOGIC: Native Streamlit controls remain keyboard accessible and use a compact research layout.
 CSS = """
 <style>
-.stApp{background:#f4f7fb;color:#19364b}div[data-testid="stMetric"]{background:white;border:1px solid #dce6ee;border-radius:11px;padding:14px 16px}div[data-testid="stMetricLabel"],div[data-testid="stMetricLabel"] p{color:#435f75!important}div[data-testid="stMetricValue"]{color:#087785}section[data-testid="stSidebar"]{background:#edf3f8}.jf-hero{background:linear-gradient(115deg,#15354c,#096977);color:white;padding:27px 30px;border-radius:15px;margin:0 0 20px}.jf-hero h1{font-size:34px;margin:2px 0 7px;color:white}.jf-hero p{color:#e0eef3;font-size:15px;margin:0}.jf-eyebrow{font-size:11px;font-weight:750;letter-spacing:.18em;color:#bce1e5;text-transform:uppercase}.jf-note{color:#526b7f;font-size:13px;padding:12px 0}.stButton>button[kind="primary"]{background:#087f8c;border-color:#087f8c}.stTabs [data-baseweb="tab-list"]{gap:17px}.stTabs [data-baseweb="tab"]{font-weight:650}div[data-testid="stExpander"]{background:white;border-radius:10px}
-div[data-testid="stLatex"]{max-width:100%;overflow-x:auto;padding:2px 0}div[data-testid="stLatex"] .katex-display{margin:.3em 0;max-width:100%;overflow-x:auto}div[data-testid="stLatex"] .katex-display>.katex{text-align:left}
+.stApp{background:#F5F6F8;color:#142D3D;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.stMainBlockContainer{padding-top:4rem;padding-bottom:3rem;max-width:1680px}
+header[data-testid="stHeader"]{background:rgba(245,246,248,.92)}
+section[data-testid="stSidebar"]{background:#fff;border-right:1px solid #E1E7EC}
+section[data-testid="stSidebar"] h1{font-size:20px;letter-spacing:-.025em}
+section[data-testid="stSidebar"] [data-testid="stCaptionContainer"]{font-size:12px;line-height:1.55;color:#657887}
+.jf-hero{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:0 0 22px;margin:0 0 22px;border-bottom:1px solid #DFE5EB}
+.jf-brand{display:flex;align-items:center;gap:15px}.jf-mark{display:grid;place-items:center;flex-shrink:0;width:46px;height:46px;background:#142D3D;color:#fff;border-radius:12px;font-size:16px;font-weight:750;letter-spacing:-.06em}
+.jf-hero h1{font-size:29px;letter-spacing:-.045em;line-height:1.15;margin:4px 0;color:#142D3D;font-weight:700}
+.jf-hero p{color:#657887;font-size:13px;margin:0;line-height:1.5}.jf-eyebrow{font-size:10px;font-weight:700;letter-spacing:.13em;color:#657887;text-transform:uppercase}
+.jf-pill{display:inline-block;flex-shrink:0;padding:5px 10px;background:#E8F4F3;border:1px solid #CEE7E3;border-radius:20px;color:#137267;font-size:11px;font-weight:650}
+.jf-section-label{margin:17px 0 7px;color:#657887;font-size:10px;font-weight:750;letter-spacing:.09em;text-transform:uppercase}
+.jf-context{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 16px;color:#657887;font-size:12px}.jf-context strong{color:#142D3D;font-weight:600}.jf-context .jf-dot{color:#AAB7C0}
+.jf-method-summary{border-left:3px solid #087F8C;padding:12px 16px;margin:0 0 18px;background:#EDF5F6;border-radius:0 8px 8px 0;color:#294D5C;font-size:14px;line-height:1.65}
+.jf-method-context{padding-top:4px}.jf-method-context strong{display:block;color:#142D3D;font-size:14px;margin:4px 0}.jf-method-context span{color:#657887;font-size:12px}
+.jf-section-heading{margin:18px 0 4px;font-weight:650;letter-spacing:-.02em;color:#142D3D;font-size:18px}.jf-section-note{margin:0 0 14px;color:#657887;font-size:12px;line-height:1.6}
+.jf-empty{background:#fff;border:1px solid #DEE6EC;border-radius:12px;padding:24px;margin:8px 0 16px}.jf-empty h2{margin:0 0 8px;font-size:23px;letter-spacing:-.025em}.jf-empty p{color:#657887;margin:0;font-size:14px;line-height:1.65}
+.jf-step{border-top:2px solid #D6E7E9;padding:13px 0;margin:8px 0 15px}.jf-step span{color:#087F8C;font-size:11px;font-weight:700}.jf-step strong{display:block;margin:5px 0;font-size:14px}.jf-step p{font-size:12px;line-height:1.6;color:#657887;margin:0}
+div[data-testid="stMetric"]{background:white;border:1px solid #E0E6EC;border-radius:10px;padding:14px 15px;box-shadow:0 2px 4px rgba(20,45,61,.025)}
+div[data-testid="stMetricLabel"] p{font-size:11px!important;color:#657887!important;font-weight:500}div[data-testid="stMetricValue"]{font-size:27px!important;color:#142D3D;letter-spacing:-.035em;font-weight:650}
+.st-key-jf-metrics [data-testid="stColumn"]:nth-child(3) [data-testid="stMetricValue"]{color:#D84C62}
+.st-key-jf-metrics [data-testid="stColumn"]:nth-child(4) [data-testid="stMetricValue"]{color:#087F8C}
+.stButton>button{font-size:13px;font-weight:600;border-radius:8px;min-height:38px}.stButton>button[kind="primary"]{background:#087F8C;border-color:#087F8C;box-shadow:0 2px 4px rgba(8,127,140,.1)}
+.stButton>button[kind="primary"]:hover{background:#076F7B;border-color:#076F7B}.stButton>button:focus-visible{outline:3px solid #87B9C1;outline-offset:2px}
+.st-key-jf-apply{position:sticky;bottom:0;background:#fff;padding-top:12px;border-top:1px solid #E1E7EC;z-index:5}
+.stTabs [data-baseweb="tab-list"]{gap:22px;margin-top:15px}.stTabs [data-baseweb="tab"]{font-size:12px;font-weight:600;padding-bottom:13px}.stTabs [aria-selected="true"]{color:#087F8C}
+div[data-testid="stExpander"]{background:white;border:1px solid #DEE6EC;border-radius:9px}div[data-testid="stExpander"] details summary p{font-size:13px;font-weight:600}
+div[data-testid="stDataFrame"]{border-radius:9px;overflow:hidden}div[data-testid="stPlotlyChart"]{border:1px solid #E1E7EC;border-radius:11px;overflow:hidden;background:#fff}
+div[data-testid="stLatex"]{background:#F7F9FB;border:1px solid #E9EEF2;border-radius:8px;max-width:100%;overflow-x:auto;padding:10px 14px;margin:7px 0 12px}
+div[data-testid="stLatex"] .katex-display{margin:.3em 0;max-width:100%;overflow-x:auto}div[data-testid="stLatex"] .katex-display>.katex{text-align:left}
+@media(max-width:900px){.jf-hero{align-items:flex-start}.jf-hero>.jf-pill{display:none}.jf-hero h1{font-size:25px}.stMainBlockContainer{padding-left:1.1rem;padding-right:1.1rem}.stTabs [data-baseweb="tab-list"]{gap:13px}}
 </style>
 """
+
+
+def _section(title, note=None):
+    # UI LOGIC: Escaped headings provide the same hierarchy in tables, plots, and method documentation.
+    st.markdown(f'<div class="jf-section-heading">{escape(title)}</div>', unsafe_allow_html=True)
+    if note:
+        st.markdown(f'<p class="jf-section-note">{escape(note)}</p>', unsafe_allow_html=True)
+
+
+def _math_steps(steps):
+    # UI LOGIC: Progressive disclosure keeps every source equation and explanatory clause available.
+    for title, prose, formula in steps:
+        st.markdown(f"**{title}**")
+        st.write(prose)
+        for block in math_display_blocks(formula):
+            st.latex(block)
 
 
 @st.cache_data(show_spinner=False)
@@ -52,17 +98,23 @@ def _method_mathematics(method, pending_config, applied_method=None):
     card = METHOD_EXPLANATIONS[method]
     st.subheader(card["name"])
     st.caption(f'{card["mode"]} · Explanation follows selected method: {method} · Applied plots and exports: {applied_method or "none yet"}')
-    st.write(card["summary"])
-    for title, prose, formula in COMMON_STEPS + CLOCK_STEPS + card["steps"] + FITTING_STEPS:
-        st.markdown(f"**{title}**")
-        st.write(prose)
-        for block in math_display_blocks(formula):
-            st.latex(block)
-    st.markdown("**Numeric example**")
-    st.write(card["example"])
-    st.markdown("**Assumptions and limits**")
-    st.write(card["tradeoffs"])
-    st.markdown("**Selected parameters / pending settings**")
+    st.markdown(f'<div class="jf-method-summary">{escape(card["summary"])}</div>', unsafe_allow_html=True)
+    with st.expander("Algorithm · equations and decision rule", expanded=True):
+        _math_steps(card["steps"])
+    example, limits = st.columns(2)
+    with example:
+        _section("Numerical example")
+        st.write(card["example"])
+    with limits:
+        _section("Assumptions and limitations")
+        st.write(card["tradeoffs"])
+    with st.expander("Shared foundations · neighborhoods, scales and strict boundaries"):
+        _math_steps(COMMON_STEPS)
+    with st.expander("Market clock · sessions, irregular events and liquidity"):
+        _math_steps(CLOCK_STEPS)
+    with st.expander("Downstream fitting · selection, influence and coverage"):
+        _math_steps(FITTING_STEPS)
+    _section("Selected parameters", "These values follow your current controls; plots and exports follow the last successful Apply.")
     records = [(name, str(pending_config[name]), PARAMETER_HELP[name]) for name in card["parameters"]]
     records += [(name, str(pending_config[name]), explanation) for name, explanation in
                 [("horizon", "Reference-time distance limit; multiscale uses 1, 2 and 4 times this value."),
@@ -97,9 +149,32 @@ def _metrics(rows):
               ("Flagged", f'{stats["outliers"]:,}'),
               ("Flag rate", f'{stats["flag_rate"]:.1%}' if np.isfinite(stats["flag_rate"]) else "—"),
               ("Low support", f'{stats["unsupported"]:,}'), ("Invalid", f'{stats["invalid"]:,}')]
-    for column, (label, value) in zip(st.columns(6), labels):
-        column.metric(label, value)
+    with st.container(key="jf-metrics"):
+        for column, (label, value) in zip(st.columns(6), labels):
+            column.metric(label, value)
     return stats
+
+
+def _table(frame, *, height="auto"):
+    # UI LOGIC: Human-readable headers and explicit units format the original audit values without altering them.
+    labels = {"CUSIP": "CUSIP", "rows": "Trades", "total": "Trades", "supplied": "Supplied", "evaluated": "Evaluated", "flagged": "Flagged",
+              "outliers": "Flagged", "accepted": "Accepted", "fit_eligible": "Fit eligible", "invalid": "Invalid",
+              "insufficient": "Low support", "regime_candidates": "Regime candidates", "median_score": "Median score",
+              "median_reference_count": "Median references", "flagged_rate": "Flag rate", "flag_rate": "Flag rate",
+              "coverage": "Coverage", "hard_retention": "Hard retention", "hard_fit_rows": "Hard-fit rows",
+              "soft_fit_rows": "Soft-fit rows", "soft_weight_sum": "Sum of influence weights", "jf_status": "Status",
+              "jf_reason": "Reason", "jf_n_reference": "References", "jf_score": "Robust score", "jf_baseline": "Baseline",
+              "jf_residual": "Residual", "jf_threshold": "Deviation cutoff", "jf_weight": "Influence weight",
+              "jf_fit_eligible": "Fit eligible", "jf_row_id": "Source row", "jf_gap_minutes": "Active gap · min",
+              "jf_wall_gap_minutes": "Wall gap · min", "jf_session_boundary": "Session boundary", "jf_scale": "Local scale",
+              "jf_reference_density_per_hour": "References / hour", "jf_reference_span_minutes": "Reference span · min"}
+    config = {name: st.column_config.Column(labels.get(name, name.replace("_", " ").capitalize())) for name in frame.columns}
+    for name in ["coverage", "flagged_rate", "flag_rate", "hard_retention"]:
+        if name in frame:
+            config[name] = st.column_config.NumberColumn(labels[name], format="percent", width="small")
+    if "jf_time" in frame:
+        config["jf_time"] = st.column_config.DatetimeColumn("Time · UTC", format="YYYY-MM-DD HH:mm", width="medium")
+    st.dataframe(frame, width="stretch", hide_index=True, height=height, column_config=config)
 
 
 def _downloads(review, selected):
@@ -124,10 +199,12 @@ def _downloads(review, selected):
 
 def main():
     # UI LOGIC: Page setup precedes all content and file loading.
-    st.set_page_config(page_title="Jump Filter · Bond trade review", page_icon="📈", layout="wide")
+    st.set_page_config(page_title="Jump Filter · Bond trade review", page_icon="📈", layout="wide", initial_sidebar_state="expanded")
     st.markdown(CSS, unsafe_allow_html=True)
-    st.markdown('<div class="jf-hero"><div class="jf-eyebrow">Bond trade quality / Research workbench</div><h1>Jump Filter</h1><p>Flag unusual spreads, inspect local evidence, and preserve meaningful spread moves.</p></div>', unsafe_allow_html=True)
-    st.sidebar.title("Review controls")
+    st.markdown('<div class="jf-hero"><div class="jf-brand"><div class="jf-mark">jf</div><div><div class="jf-eyebrow">Bond spread research</div><h1>Jump Filter</h1><p>Review trade quality. Preserve meaningful market moves.</p></div></div><span class="jf-pill">Historical fitting</span></div>', unsafe_allow_html=True)
+    st.sidebar.title("Configure review")
+    st.sidebar.caption("Set up the filter, then Apply to publish a review.")
+    st.sidebar.markdown('<div class="jf-section-label">01 · Data</div>', unsafe_allow_html=True)
     source = st.sidebar.radio("Data source", ["Synthetic demonstration", "Upload CSV"])
     # FILE IO LOGIC: Read uploads as text to retain CUSIP leading zeros; the engine converts only mapped fields.
     if source == "Upload CSV":
@@ -158,9 +235,9 @@ def main():
         zone = st.text_input("Timezone for naive timestamps", "UTC", help="Aware timestamps retain their actual instant. Naive timestamps are interpreted in this timezone.")
         unit = st.text_input("Spread unit label", "bp", help="Display label only. Convert spreads upstream if needed; no automatic scaling.")
     mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, timezone=zone)
+    st.sidebar.markdown('<div class="jf-section-label">02 · Detection</div>', unsafe_allow_html=True)
     method = st.sidebar.selectbox("Method", METHODS, format_func=lambda name: METHOD_LABELS[name], index=list(METHODS).index("consensus"))
-    st.sidebar.caption(METHOD_HELP[method])
-    st.sidebar.caption("Historical screening can use future trades. Causal EWMA is an online comparator. Parameters unused by the selected method are disabled.")
+    st.sidebar.caption(METHOD_EXPLANATIONS[method]["mode"])
     config_values = {}
     relevant = METHOD_EXPLANATIONS[method]["parameters"]
     # UI LOGIC: Hyperparameter values are shared between the exact input and its slider.
@@ -179,8 +256,13 @@ def main():
                  ("alpha", "EWMA learning rate", .2, .01, 1., .01, False),
                  ("persistence", "Persistence cohorts", 3, 2, 10, 1, True)]
         for name, label, value, lower, upper, step, integer in specs:
-            config_values[name] = _parameter(name, label, value, lower, upper, step,
-                                             integer=integer, disabled=name not in relevant)
+            if name in relevant:
+                config_values[name] = _parameter(name, label, value, lower, upper, step, integer=integer)
+        with st.expander("Inactive parameters", expanded=False):
+            st.caption("These settings belong to other methods and do not affect the selected filter.")
+            for name, label, value, lower, upper, step, integer in specs:
+                if name not in relevant:
+                    config_values[name] = _parameter(name, label, value, lower, upper, step, integer=integer, disabled=True)
         horizon = st.text_input("Reference horizon", "3D", help="Pandas duration, for example 6h or 3D. In trading mode this means cumulative open-session time.")
         max_gap = st.text_input("Session break gap", "1D", help="Split after this much inactive elapsed time in the selected clock. Trading mode removes configured market closures.")
     with st.sidebar.expander("Trading calendar and liquidity gaps", expanded=False):
@@ -208,7 +290,9 @@ def main():
     pending_config = dict(method=method, horizon=horizon, max_gap=max_gap, time_basis=time_basis,
                           session_timezone=session_timezone, session_open=session_open, session_close=session_close,
                           holidays=tuple(value.strip() for value in holidays_text.split(",") if value.strip()), **config_values)
-    applied = st.sidebar.button("Apply filter", type="primary", width="stretch")
+    with st.sidebar.container(key="jf-apply"):
+        applied = st.button("Apply filter", type="primary", width="stretch")
+        st.caption("Edits stay pending until you apply. Exports retain the applied settings.")
     signature = dict(source_id=source_id, mapping=mapping, config=pending_config, unit=unit,
                      schedule_fingerprint=schedule_id, schedule_requested=use_schedule and time_basis == "trading")
     # UI LOGIC: A failed Apply leaves the last valid snapshot downloadable and visible.
@@ -233,18 +317,23 @@ def main():
     if review is None:
         preview_tab, math_tab = st.tabs(["Trade review", "Method & mathematics"])
         with preview_tab:
-            st.info("Choose a method and click Apply filter. Method & mathematics already explains your selected method, with formulas and numerical examples.")
-            st.dataframe(data.head(12), width="stretch", hide_index=True)
+            st.markdown('<div class="jf-empty"><h2>Start a trade-quality review</h2><p>Choose a method in the sidebar and click <strong>Apply filter</strong>. Explore the synthetic dataset, or upload your own CUSIP, time and spread records.</p></div>', unsafe_allow_html=True)
+            steps = [("01", "Choose your evidence", "Load a CSV or use the generated bond scenarios."),
+                     ("02", "Set the method", "Tune the threshold, neighborhood and market calendar."),
+                     ("03", "Review the result", "Inspect flagged trades, local support and fitting coverage.")]
+            for column, (number, title, note) in zip(st.columns(3), steps):
+                column.markdown(f'<div class="jf-step"><span>{number}</span><strong>{title}</strong><p>{note}</p></div>', unsafe_allow_html=True)
+            _section("Input preview", f"{len(data):,} supplied rows · {source_label}")
+            _table(data.head(12))
         with math_tab:
             _method_mathematics(method, pending_config)
         return
     # UI LOGIC: All panels use applied mappings and data, including after unsuccessful edits.
     result, applied_mapping = review["result"], review["mapping"]
     active_cusip, active_spread = applied_mapping["cusip_col"], applied_mapping["spread_col"]
-    st.caption(f'Applied source: {review["source_label"]} · {len(result):,} rows · {METHOD_LABELS[review["config"].method]} · {review["unit"]}')
+    st.markdown(f'<div class="jf-context"><span class="jf-pill">Applied review</span><strong>{escape(review["source_label"])}</strong><span class="jf-dot">·</span><span>{len(result):,} rows</span><span class="jf-dot">·</span><span>{escape(review["unit"])}</span></div>', unsafe_allow_html=True)
     if signature != review["signature"]:
         st.warning("Pending changes. These results and downloads use the last successful Apply.")
-    st.markdown('<div class="jf-note">Historical fitting can use earlier and later trades to assess anomalies. Three columns cannot establish retail origin, distress, markup or commission. Baselines are diagnostic references. Hard fitting uses supported, unflagged records; see fitting coverage and the mathematics tab.</div>', unsafe_allow_html=True)
     # UI LOGIC: Selector labels retain exact CUSIP values and do not hide sparse bonds.
     choices = list(result[active_cusip].dropna().drop_duplicates())
     if not choices:
@@ -252,40 +341,51 @@ def main():
         st.dataframe(result, width="stretch", hide_index=True)
         _downloads(review, result.iloc[:0])
         return
-    selected_value = st.selectbox("Bond / CUSIP", choices, format_func=str, key=f'focus_{review["source_id"]}_{active_cusip}')
+    bond_control, method_context = st.columns([1.15, 1], gap="large")
+    with bond_control:
+        selected_value = st.selectbox("Bond / CUSIP", choices, format_func=str, key=f'focus_{review["source_id"]}_{active_cusip}')
+    with method_context:
+        st.markdown(f'<div class="jf-method-context"><div class="jf-eyebrow">Applied method</div><strong>{escape(METHOD_LABELS[review["config"].method])}</strong><span>{escape(review["config"].time_basis.title())} clock · {escape(str(review["config"].horizon))} horizon · {escape(str(review["config"].window))} reference timestamps</span></div>', unsafe_allow_html=True)
     selected = _select_bond(result, active_cusip, selected_value)
     _metrics(selected)
-    trades_tab, math_tab, statistics_tab, comparison_tab, audit_tab = st.tabs(["Trade review", "Method & mathematics", "Statistical dashboard", "Method comparison", "Trade audit"])
+    trades_tab, statistics_tab, comparison_tab, math_tab, audit_tab = st.tabs(["Trade review", "Statistics", "Compare methods", "Method & mathematics", "Trade audit"])
     with trades_tab:
         st.plotly_chart(trade_figure(selected, cusip_col=active_cusip, spread_col=active_spread, unit=review["unit"],
                                     title=f'{selected_value} · {METHOD_LABELS[review["config"].method]}',
                                     max_gap=review["config"].max_gap), width="stretch")
-        st.caption("Red crosses: flagged trades. Amber diamonds: level change candidates or ambiguous transitions. Amber triangles: provisional causal jumps. All finite timed trades are shown; hover for local support, volatility and trading-time gaps.")
+        st.caption("Hover a trade for its reason, score and local support. Red crosses mark outliers; amber symbols mark transitions. Original spreads are preserved.")
+        with st.expander("How to read this review"):
+            st.write("The shaded band is the method's deviation cutoff around its diagnostic baseline. Empty markers are unscored records or ambiguous transitions; they are not automatically eligible for fitting. Session boundaries break the reference path.")
+            st.write("Historical screening can use future trades. CUSIP, time and spread identify statistical deviations; they cannot establish retail origin, distress, markup or commission. The baseline is a diagnostic reference, not an observed market mid.")
     with math_tab:
         _method_mathematics(method, pending_config, review["config"].method)
     with statistics_tab:
-        st.markdown("**All bonds · applied method**")
-        st.dataframe(summarize(result, cusip_col=active_cusip), width="stretch", hide_index=True)
-        st.markdown("**Fitting coverage and retention**")
-        st.dataframe(fitting_statistics(result, cusip_col=active_cusip), width="stretch", hide_index=True)
+        _section("Bond overview", "Flag rate uses evaluated trades; coverage uses every supplied row.")
+        summary = summarize(result, cusip_col=active_cusip)
+        overview = [active_cusip, "rows", "evaluated", "flagged", "fit_eligible", "flagged_rate", "coverage"]
+        _table(summary[overview])
+        with st.expander("Full bond statistics"):
+            _table(summary)
+        _section("Fitting coverage and retention")
+        _table(fitting_statistics(result, cusip_col=active_cusip))
         st.caption("Hard fit uses jf_fit_eligible (status ok and unflagged). Soft fit uses positive weights among status ok/outlier. Ambiguous transitions, provisional, invalid, unsupported and solver-failure records are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size or inverse variance.")
         st.plotly_chart(diagnostic_figure(selected, spread_col=active_spread, unit=review["unit"]), width="stretch")
         daily, reasons = st.columns(2)
         audits = audit_tables(selected)
         with daily:
-            st.markdown("**Selected bond · daily support**")
-            st.dataframe(audits["daily"], width="stretch", hide_index=True)
+            _section("Observed daily support")
+            _table(audits["daily"])
         with reasons:
-            st.markdown("**Selected bond · flag and support reasons**")
-            st.dataframe(audits["reasons"], width="stretch", hide_index=True)
+            _section("Flag and support reasons")
+            _table(audits["reasons"])
         st.caption("Flag rate uses evaluated records. Invalid and insufficient-history records remain in the audit table and exports.")
         support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
                            "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
-        st.markdown("**Selected bond · local liquidity and uncertainty diagnostics**")
-        st.dataframe(selected[[name for name in support_columns if name in selected]], width="stretch", hide_index=True)
+        with st.expander("Local liquidity and uncertainty · per-trade diagnostics"):
+            _table(selected[[name for name in support_columns if name in selected]], height=350)
         st.caption("Density counts distinct timestamp cohorts per reference-span hour, using the applied distance clock. Local volatility is the method's diagnostic scale. Unsupported transitions remain explicit; high volatility or low liquidity is not itself an outlier label.")
     with comparison_tab:
-        st.caption("Run all methods on this bond with the applied hyperparameters. Differences describe sensitivity; a higher flag rate does not establish better filtering.")
+        _section("Method sensitivity", "Compare all nine methods on this bond using the applied settings. A higher flag count does not establish better accuracy.")
         compare_key = (review["source_id"], str(selected_value), json.dumps(asdict(review["config"]), sort_keys=True))
         if st.button("Compare methods for this bond"):
             with st.spinner("Evaluating all methods on the selected bond…"):
@@ -298,9 +398,10 @@ def main():
         comparison = st.session_state.get("jf_comparison")
         if comparison is not None and comparison[0] == compare_key:
             st.plotly_chart(comparison_figure(comparison[1]), width="stretch")
-            st.dataframe(comparison[1], width="stretch", hide_index=True)
+            _table(comparison[1])
             st.download_button("Method comparison CSV", comparison[1].to_csv(index=False), "method_comparison.csv", "text/csv")
     with audit_tab:
+        _section("Trade audit", "Inspect original observations alongside flags, reasons, references and fitting eligibility.")
         flagged_only = st.checkbox("Show flagged trades only", value=False)
         # UI LOGIC: This display-only option never changes the applied flag denominator or downloadable rows.
         shown = selected.loc[selected["jf_is_outlier"]] if flagged_only else selected
@@ -308,9 +409,10 @@ def main():
                      "jf_baseline", "jf_residual", "jf_threshold", "jf_n_reference", "jf_weight", "jf_fit_eligible",
                      "jf_n_votes", "jf_n_scales", "jf_solver_iterations", "jf_solver_converged",
                      "jf_reference_density_per_hour", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary", "jf_row_id"]
-        st.dataframe(shown[[name for name in dict.fromkeys(preferred) if name in shown]], width="stretch", hide_index=True)
-    st.markdown("**Export applied review**")
-    _downloads(review, selected)
+        _table(shown[[name for name in dict.fromkeys(preferred) if name in shown]], height=440)
+    with st.expander("Export applied review · data, settings and standalone chart"):
+        st.caption("Every file uses the last successful Apply. The chart follows the selected bond; annotations retain all source rows.")
+        _downloads(review, selected)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,8 @@ python -m streamlit run jump_filter/app.py
 
 Open **jump_filter_dashboard.ipynb** for the notebook dashboard, or use the browser dashboard with a synthetic demonstration or CSV upload. Both provide CUSIP and nine-method selection, paired sliders and exact inputs, plots, red outlier markers, reference bands, statistics, method comparisons and exports. **Method & mathematics** explains each algorithm in English with formulas, numeric examples, parameter effects and limits; it follows the selected method immediately. Local diagnostics show reference density, span, gaps and the method's noise scale. Apply publishes a reproducible snapshot; pending settings do not silently alter downloads.
 
+The workbench uses a compact light layout with six review metrics, method-specific tuning controls, and expandable statistics and mathematical details. Inactive parameters remain available but disabled. Charts share a consistent palette and distinguish outliers and transitions by marker shape as well as color; method comparisons use horizontal bars with readable names and explicit evaluation coverage. Notebook charts resize to their output pane, and the notebook marks settings as Ready, Applied or Pending so the displayed review remains easy to audit.
+
 ## Run inside Jupyter Notebook
 
 The notebook dashboard uses native `ipywidgets` controls and Plotly `FigureWidget` charts. It runs inside Jupyter Notebook 7 or JupyterLab 4, with no Streamlit server required. Install the notebook extra in the environment that will run both Jupyter and the kernel:

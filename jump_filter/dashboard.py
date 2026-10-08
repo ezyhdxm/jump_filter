@@ -11,11 +11,61 @@ import pandas as pd
 from .explanations import METHOD_HELP, METHOD_EXPLANATIONS, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, PARAMETER_HELP, math_display_blocks
 
 # UI LOGIC: CSS is scoped to this workbench and never changes another notebook's controls.
+# Trick: Native widget inputs use a horizontal 148px flex basis; column labels require an explicit 38px vertical basis.
 STYLE = """
-.jf-workbench{background:#f2f6fa;color:#19364b;font:14px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:18px;border-radius:17px;border:1px solid #dce5ee;max-width:1500px;width:100%;box-sizing:border-box}
-.jf-workbench *{box-sizing:border-box}.jf-workbench .widget-vbox{gap:12px;min-width:0}.jf-workbench .jf-hero{padding:25px;background:linear-gradient(115deg,#15354c,#096977);color:white;border-radius:12px}.jf-workbench .jf-hero h2{color:white;margin:4px 0 9px;font-size:27px}.jf-workbench .jf-hero p{margin:0;color:#dfedf3}.jf-workbench .jf-eyebrow{color:#bde3e6;font-size:11px;letter-spacing:.15em;font-weight:700;text-transform:uppercase}
-.jf-workbench .jf-card{background:white;border:1px solid #dce5ee;border-radius:11px;padding:17px;min-width:0}.jf-workbench .jf-help{color:#526a7f;font-size:13px}.jf-workbench .jf-row{display:flex;flex-flow:row wrap;gap:13px;align-items:flex-end}.jf-workbench .jf-control{flex:1 1 230px;min-width:0;max-width:100%;height:auto}.jf-workbench .jf-control:not(.widget-checkbox){display:flex;flex-direction:column;align-items:stretch}.jf-workbench .jf-control .widget-label{width:100%!important;text-align:left;white-space:normal;overflow:visible;height:auto;font-size:12px;font-weight:650;color:#304b61;margin-bottom:4px}.jf-workbench input:not([type=checkbox]),.jf-workbench select{border:1px solid #bfd0de;border-radius:6px;color:#19364b;padding:5px;min-height:34px}.jf-workbench .widget-button{height:38px;border-radius:7px;font-weight:650;padding:8px 16px}.jf-workbench .widget-button.mod-primary{background:#087f8c;color:white;border-color:#087f8c}.jf-workbench .jf-status{padding:11px 14px;border:1px solid #cbdce6;border-left:4px solid #087f8c;background:#edf5f8;border-radius:7px}.jf-workbench .jf-pending{color:#855d17;background:#fff5df;padding:7px 11px;border-radius:7px}.jf-workbench .jf-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:11px}.jf-workbench .jf-kpi{background:#f5fafb;border:1px solid #dbe6ec;padding:13px;border-radius:8px}.jf-workbench .jf-kpi strong{display:block;font-size:24px;color:#086f7d}.jf-workbench .jf-kpi span{font-size:12px;color:#526a7f}.jf-workbench .jf-table{overflow:auto;max-height:430px;border:1px solid #dce5ee;border-radius:8px}.jf-workbench table{border-collapse:separate;border-spacing:0;width:100%;font-size:12px;font-variant-numeric:tabular-nums}.jf-workbench th,.jf-workbench td{white-space:nowrap;padding:8px 10px!important;border:0!important;border-bottom:1px solid #e7edf3!important;text-align:right}.jf-workbench thead th{position:sticky;top:0;background:#eaf1f6;z-index:1;color:#29465c}.jf-workbench tbody tr:nth-child(even){background:#f6f9fc}.jf-workbench td:first-child,.jf-workbench th:first-child{text-align:left}.jf-workbench .widget-tab-contents{padding:13px;border:1px solid #dce5ee;background:white}.jf-workbench .jf-param{flex:1 1 270px;min-width:0;border:1px solid #e0e8ef;border-radius:8px;padding:10px}.jf-workbench .jf-param-title{font-size:12px;font-weight:650;color:#304b61}.jf-workbench .jf-param .widget-hslider{width:100%;min-width:0}.jf-workbench .jf-param .widget-text{width:100%}.jf-workbench .widget-html-content{max-width:100%}
-.jf-workbench .output_subarea,.jf-workbench .jp-RenderedMath,.jf-workbench mjx-container[display="true"]{max-width:100%;overflow-x:auto}.jf-workbench .MathJax_Display{max-width:100%;overflow-x:auto;text-align:left!important}
+.jf-workbench{--jf-ink:#142D3D;--jf-teal:#087F8C;--jf-muted:#657887;--jf-line:#DDE4E8;background:#F5F6F8;color:var(--jf-ink);font:14px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px;border-radius:16px;border:1px solid var(--jf-line);max-width:1500px;width:100%;box-sizing:border-box}
+.jf-workbench *{box-sizing:border-box}.jf-workbench .widget-vbox{gap:12px;min-width:0}.jf-workbench .widget-html-content{max-width:100%}.jf-workbench h2,.jf-workbench h3,.jf-workbench h4{color:var(--jf-ink);line-height:1.3}.jf-workbench h3{font-size:20px;margin:0 0 10px}.jf-workbench h4{font-size:14px;margin:22px 0 8px}.jf-workbench p{margin:0 0 8px}.jf-workbench .jf-hero{padding:0 0 17px;border-bottom:1px solid var(--jf-line)}.jf-workbench .jf-hero h2{margin:5px 0 6px;font-size:30px;font-weight:750;letter-spacing:-.035em}.jf-workbench .jf-hero p{margin:0;color:var(--jf-muted);font-size:14px;max-width:800px}.jf-workbench .jf-eyebrow{color:var(--jf-teal);font-size:10px;letter-spacing:.16em;font-weight:750;text-transform:uppercase}.jf-workbench .jf-hero-top{display:flex;align-items:center;justify-content:space-between;gap:12px}.jf-workbench .jf-badge{display:inline-block;padding:3px 9px;border:1px solid #C8E3E5;border-radius:20px;color:#076A74;background:#E9F5F5;font-size:11px;font-weight:650;white-space:nowrap}
+.jf-workbench .jf-card{background:white;border:1px solid var(--jf-line);border-radius:10px;padding:16px;min-width:0}.jf-workbench .jf-help{color:var(--jf-muted);font-size:12px;line-height:1.55}.jf-workbench .jf-row{display:flex;flex-flow:row wrap;gap:12px;align-items:flex-end;min-width:0}.jf-workbench .jf-selection{padding:15px 17px;background:white;border:1px solid var(--jf-line);border-radius:10px}.jf-workbench .jf-control{flex:1 1 230px;min-width:0;max-width:100%;height:auto}.jf-workbench .jf-control:not(.widget-checkbox){display:flex;flex-direction:column;align-items:stretch}.jf-workbench .jf-control .widget-label{width:100%!important;text-align:left;white-space:normal;overflow:visible;height:auto;font-size:11px;font-weight:700;color:var(--jf-ink);margin-bottom:5px;letter-spacing:.015em}.jf-workbench input:not([type=checkbox]),.jf-workbench select{border:1px solid #CDD7DE;border-radius:6px;color:var(--jf-ink);background:#FFF;padding:7px 10px;min-height:37px;font-size:13px}.jf-workbench input:focus,.jf-workbench select:focus,.jf-workbench button:focus-visible{outline:2px solid var(--jf-teal);outline-offset:2px}.jf-workbench .widget-button{height:38px;border:1px solid #CDD7DE;background:white;color:var(--jf-ink);border-radius:7px;font-weight:650;padding:7px 15px;transition:background .15s}.jf-workbench .widget-button:hover{background:#EEF3F5}.jf-workbench .widget-button.mod-primary{background:var(--jf-teal);color:white;border-color:var(--jf-teal)}.jf-workbench .widget-button.mod-primary:hover{background:#076A74}.jf-workbench .widget-button:disabled{opacity:.5}.jf-workbench .jf-actionbar{align-items:center}.jf-workbench .jf-actionbar .widget-button{flex:0 1 auto}.jf-workbench .jf-actionbar .jf-state-area{flex:1 1 230px}.jf-workbench .jf-status{padding:9px 12px;border:1px solid #C9E2E4;background:#F0F8F8;border-radius:7px;color:#27636B;font-size:12px}.jf-workbench .jf-status:empty{display:none}.jf-workbench .jf-status-error{border-color:#ECC7CE;background:#FFF1F3;color:#9F3043}.jf-workbench .jf-state{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--jf-muted)}.jf-workbench .jf-state-pending .jf-badge{background:#FFF5E3;border-color:#EAD3A4;color:#865E20}.jf-workbench .jf-state-ready .jf-badge{background:#EEF2F5;border-color:#DDE4E8;color:#596E7D}
+.jf-workbench .jf-control select,.jf-workbench .jf-control input:not([type=checkbox]){flex:0 0 38px;height:38px;min-height:38px;max-height:38px;width:100%;margin:0}.jf-workbench .jf-method-context{padding:0 2px}.jf-workbench .jf-method-context p{margin:6px 0 0;max-width:1000px}.jf-workbench .jf-kpis{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:9px}.jf-workbench .jf-kpi{background:white;border:1px solid var(--jf-line);padding:13px 12px;border-radius:9px;font-variant-numeric:tabular-nums}.jf-workbench .jf-kpi strong{display:block;font-size:23px;line-height:1.25;font-weight:700;letter-spacing:-.025em;margin-bottom:5px;color:var(--jf-ink)}.jf-workbench .jf-kpi span{font-size:10px;line-height:1.3;color:var(--jf-muted)}.jf-workbench .jf-kpi-alert strong{color:#BA3C51}.jf-workbench .jf-kpi-rate strong{color:var(--jf-teal)}.jf-workbench .jf-table{overflow:auto;max-height:400px;border:1px solid var(--jf-line);border-radius:8px}.jf-workbench table{border-collapse:separate;border-spacing:0;width:100%;font-size:12px;font-variant-numeric:tabular-nums}.jf-workbench th,.jf-workbench td{white-space:nowrap;padding:9px 11px!important;border:0!important;border-bottom:1px solid #EAF0F3!important;text-align:right}.jf-workbench thead th{position:sticky;top:0;background:#F1F5F7;z-index:1;color:#4D6371;font-size:11px;font-weight:650}.jf-workbench tbody tr:nth-child(even){background:#FAFCFD}.jf-workbench tbody tr:hover{background:#EFF8F8}.jf-workbench td:first-child,.jf-workbench th:first-child{text-align:left}
+.jf-workbench .widget-tab{width:100%;min-width:0}.jf-workbench .widget-tab>.p-TabBar,.jf-workbench .widget-tab>.lm-TabBar{overflow:auto;min-height:41px}.jf-workbench .p-TabBar-tab,.jf-workbench .lm-TabBar-tab{background:transparent;border:0;color:var(--jf-muted);padding:10px 14px;font-size:12px;font-weight:650;min-width:110px}.jf-workbench .p-TabBar-tab.p-mod-current,.jf-workbench .lm-TabBar-tab.lm-mod-current{background:white;color:var(--jf-teal);border-bottom:2px solid var(--jf-teal)}.jf-workbench .widget-tab-contents{padding:16px;border:1px solid var(--jf-line);background:white;border-radius:0 9px 9px 9px;min-width:0}.jf-workbench .widget-accordion{width:100%;min-width:0}.jf-workbench .widget-accordion .p-Collapse-header,.jf-workbench .widget-accordion .lm-Collapse-header{background:white;border:1px solid var(--jf-line);color:var(--jf-ink);padding:11px 13px;font-size:12px;font-weight:650}.jf-workbench .widget-accordion .p-Collapse-contents,.jf-workbench .widget-accordion .lm-Collapse-contents{background:white;border:1px solid var(--jf-line);padding:15px}.jf-workbench .jf-param{flex:1 1 275px;min-width:0;border:1px solid var(--jf-line);border-radius:8px;padding:12px;gap:6px;background:#FAFCFD}.jf-workbench .jf-param-title{font-size:11px;font-weight:700;color:var(--jf-ink)}.jf-workbench .jf-param .widget-hslider{width:100%;min-width:0}.jf-workbench .jf-param .widget-text{width:110px;flex:0 0 110px}.jf-workbench .jf-param-values{display:flex;flex-direction:row;align-items:center;gap:12px;width:100%;min-width:0}.jf-workbench .jf-param-values .widget-hslider{flex:1 1 auto;min-width:80px}.jf-workbench .jf-param .jf-help{font-size:11px;margin:0}.jf-workbench .jf-note{font-size:12px;color:var(--jf-muted)}.jf-workbench .jf-note summary{cursor:pointer;color:var(--jf-muted);font-weight:600}.jf-workbench .jf-note p{margin:9px 0 0;line-height:1.65}.jf-workbench .jf-export{border-top:1px solid var(--jf-line);padding-top:15px}.jf-workbench .jf-export .jf-control{flex:1 1 300px}.jf-workbench .jf-math-section{padding:0 3px}.jf-workbench .jf-math-section h4:first-child{margin-top:5px}.jf-workbench .jf-math-section p{max-width:980px;line-height:1.7}.jf-workbench .jf-example{padding:14px;background:#F0F8F8;border-left:3px solid var(--jf-teal);border-radius:5px;margin:16px 0}.jf-workbench .jf-example h4{margin:0 0 6px}.jf-workbench .jf-section-heading{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:4px 0 12px}.jf-workbench .jf-section-heading h4{margin:0}.jf-workbench .jf-empty{padding:48px 18px;text-align:center;color:var(--jf-muted)}.jf-workbench .jf-empty strong{display:block;color:var(--jf-ink);font-size:16px;margin-bottom:6px}
+.jf-workbench .widget-output,.jf-workbench .jp-OutputArea,.jf-workbench .jp-OutputArea-child,.jf-workbench .jp-OutputArea-output,.jf-workbench .output_subarea,.jf-workbench .widget-subarea,.jf-workbench .jf-figure{width:100%!important;max-width:100%;min-width:0}.jf-workbench .jf-figure{display:block!important}.jf-workbench .jp-RenderedMath,.jf-workbench mjx-container[display="true"]{max-width:100%;overflow-x:auto}.jf-workbench .MathJax_Display{max-width:100%;overflow-x:auto;text-align:left!important}
+@media(max-width:760px){.jf-workbench{padding:14px}.jf-workbench .jf-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.jf-workbench .jf-hero h2{font-size:26px}.jf-workbench .jf-hero-top{align-items:flex-start}.jf-workbench .jf-hero-top .jf-badge{font-size:10px}.jf-workbench .widget-tab-contents{padding:10px}.jf-workbench .jf-param{flex-basis:100%}}
+.jf-workbench .jupyter-widget-Collapse-header{background:white;border:1px solid var(--jf-line);border-radius:7px;color:var(--jf-ink);padding:11px 13px;font-size:12px;font-weight:650}.jf-workbench .jupyter-widget-Collapse-contents{background:white;border:1px solid var(--jf-line);border-top:0;padding:15px;border-radius:0 0 7px 7px}.jf-workbench .widget-tab .p-TabBar-tab,.jf-workbench .widget-tab .lm-TabBar-tab{flex:0 0 auto!important;min-width:0!important;width:auto!important;max-width:none!important;padding:10px 14px!important;border:0!important;background:transparent!important;color:var(--jf-muted)!important;font-size:12px!important;font-weight:650!important}.jf-workbench .widget-tab .p-TabBar-tab.p-mod-current,.jf-workbench .widget-tab .lm-TabBar-tab.lm-mod-current{background:white!important;color:var(--jf-teal)!important;border-bottom:2px solid var(--jf-teal)!important}.jf-workbench .widget-tab .p-TabBar-tabLabel,.jf-workbench .widget-tab .lm-TabBar-tabLabel{white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important}
+"""
+
+# PLOTTING LOGIC: Decorate the bundled Plotly module using anywidget's supported factory and lifecycle hooks.
+# Trick: Native outputs may render while detached or hidden; observe their real width after attachment and tab reveals.
+# Plotly's responsive handler recalculates axes and SVG geometry; no chart is visually stretched by CSS.
+_RESPONSIVE_WIDGET_ESM = """
+// PLOTTING LOGIC: Load the existing locally bundled module; every original model and event callback remains intact.
+export default async () => {
+  const moduleUrl = URL.createObjectURL(new Blob([__PLOTLY_MODULE__], {type: "text/javascript"}));
+  let bundled;
+  try { bundled = await import(moduleUrl); }
+  finally { URL.revokeObjectURL(moduleUrl); }
+  const original = typeof bundled.default === "function" ? await bundled.default() : bundled.default;
+  return {
+    initialize(context) { return original.initialize?.(context); },
+    render(context) {
+      const cleanup = original.render(context);
+      const {el} = context;
+      let ready = false, lastWidth = -1, frame = null;
+      // PLOTTING LOGIC: Coalesce visible host-width changes into Plotly's normal responsive resize event.
+      const resize = () => {
+        if (!ready || !el.isConnected || el.clientWidth <= 0 || el.clientWidth === lastWidth) return;
+        lastWidth = el.clientWidth;
+        if (frame !== null) cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => { frame = null; window.dispatchEvent(new Event("resize")); });
+      };
+      const observer = new ResizeObserver(resize);
+      observer.observe(el);
+      // PLOTTING LOGIC: The bundled renderer emits this event after newPlot finishes, including for hidden views.
+      const rendered = (event) => {
+        if (event.detail?.element !== el) return;
+        ready = true;
+        resize();
+      };
+      document.addEventListener("plotlywidget-after-render", rendered);
+      // PLOTTING LOGIC: Dispose every observer/listener/frame with the original widget view.
+      return () => {
+        observer.disconnect();
+        document.removeEventListener("plotlywidget-after-render", rendered);
+        if (frame !== null) cancelAnimationFrame(frame);
+        cleanup?.();
+      };
+    },
+  };
+};
 """
 
 
@@ -103,10 +153,28 @@ def audit_tables(annotated):
 
 
 def _table_html(frame, *, limit=200):
-    # UI LOGIC: Complete rows remain in exports; notebook display alone is bounded.
-    shown = frame.head(limit)
+    # UI LOGIC: Format a bounded presentation copy with readable headers; complete raw values remain in exports.
+    # Trick: Percentage strings belong only to this copy, so downstream fitting and exports retain numeric fractions.
+    shown = frame.head(limit).copy()
+    labels = {"CUSIP": "CUSIP", "rows": "Trades", "total": "Trades", "supplied": "Supplied", "evaluated": "Evaluated",
+              "flagged": "Flagged", "outliers": "Flagged", "accepted": "Accepted", "fit_eligible": "Fit eligible",
+              "invalid": "Invalid", "insufficient": "Low support", "unsupported": "Low support", "provisional": "Provisional",
+              "regime_candidates": "Regime candidates", "regime_changes": "Regime changes", "median_score": "Median score",
+              "median_reference_count": "Median references", "flagged_rate": "Flag rate", "flag_rate": "Flag rate",
+              "coverage": "Coverage", "hard_retention": "Hard retention", "hard_fit_rows": "Hard-fit rows",
+              "soft_fit_rows": "Soft-fit rows", "soft_weight_sum": "Sum of influence weights", "solver_failures": "Solver failures",
+              "solver_failed": "Solver failures", "ambiguous_transitions": "Ambiguous transitions", "jf_status": "Status",
+              "jf_reason": "Reason", "jf_time": "Time · UTC", "date_utc": "Date · UTC", "jf_n_reference": "References",
+              "jf_score": "Robust score", "jf_baseline": "Baseline", "jf_residual": "Residual", "jf_threshold": "Deviation cutoff",
+              "jf_weight": "Influence weight", "jf_fit_eligible": "Fit eligible", "jf_row_id": "Source row",
+              "jf_gap_minutes": "Active gap · min", "jf_wall_gap_minutes": "Wall gap · min", "jf_session_boundary": "Session boundary",
+              "jf_scale": "Local scale", "jf_reference_density_per_hour": "References / hour", "jf_reference_span_minutes": "Reference span · min"}
+    for name in ["coverage", "flagged_rate", "flag_rate", "hard_retention"]:
+        if name in shown:
+            shown[name] = shown[name].map(lambda value: f"{value:.1%}" if pd.notna(value) else "—")
+    shown = shown.rename(columns=lambda name: labels.get(name, str(name).replace("_", " ").capitalize()))
     return (f'<p class="jf-help">Showing {len(shown):,} of {len(frame):,} rows.</p><div class="jf-table">' +
-            shown.to_html(index=False, escape=True, border=0, float_format=lambda x: f"{x:.5g}") + "</div>")
+            shown.to_html(index=False, escape=True, border=0, na_rep="—", float_format=lambda x: f"{x:.5g}") + "</div>")
 
 
 def _kpi_html(stats):
@@ -115,7 +183,8 @@ def _kpi_html(stats):
     items = [("Supplied trades", f'{stats["total"]:,}'), ("Evaluated", f'{stats["evaluated"]:,}'),
              ("Flagged outliers", f'{stats["outliers"]:,}'), ("Flag rate / evaluated", rate),
              ("Insufficient support", f'{stats["unsupported"]:,}'), ("Invalid input", f'{stats["invalid"]:,}')]
-    return '<div class="jf-kpis">' + ''.join(f'<div class="jf-kpi"><strong>{value}</strong><span>{label}</span></div>' for label, value in items) + '</div>'
+    classes = ["", "", " jf-kpi-alert", " jf-kpi-rate", "", ""]
+    return '<div class="jf-kpis">' + ''.join(f'<div class="jf-kpi{style}"><strong>{value}</strong><span>{label}</span></div>' for (label, value), style in zip(items, classes)) + '</div>'
 
 
 def _notebook_figure(figure):
@@ -123,7 +192,18 @@ def _notebook_figure(figure):
     # Trick: Object-array NaNs can become illegal JSON primitives; numerical arrays may remain valid binary buffers.
     # The presentation copy alone is serialized; engine results and applied-data exports retain their original values.
     import plotly.graph_objects as go
-    return go.FigureWidget(json.loads(figure.to_json(remove_uids=False)))
+    widget = go.FigureWidget(json.loads(figure.to_json(remove_uids=False)))
+    # PLOTTING LOGIC: Unset an inherited fixed width so the native view fills its actual notebook output pane.
+    # Trick: FigureWidget.layout is Plotly's chart layout, not ipywidgets.Layout; a scoped DOM class sizes its host.
+    widget.layout.width = None
+    widget.layout.autosize = True
+    widget.add_class("jf-figure")
+    widget._config = {**widget._config, "responsive": True, "displaylogo": False}
+    # PLOTTING LOGIC: Embed the original installed Plotly module without network requests or a frontend extension.
+    # Trick: Plotly 5 uses its legacy Lumino resize lifecycle and has no anywidget _esm trait to decorate.
+    if hasattr(widget, "_esm"):
+        widget._esm = _RESPONSIVE_WIDGET_ESM.replace("__PLOTLY_MODULE__", json.dumps(widget._esm), 1)
+    return widget
 
 
 class FilterDashboard:
@@ -147,6 +227,8 @@ class FilterDashboard:
         self.applied_schedule = None
         self.comparison, self._applied_state, self.busy = None, None, False
         self._figure_widgets, self._comparison_widget = (), None
+        self._explanation_widgets = ()
+        self._statistics_widgets = ()
         # VALIDATION LOGIC: Fail early for a bad mapping, before showing controls that cannot run.
         if not all(column in data for column in [cusip_col, time_col, spread_col]):
             raise ValueError("CUSIP, time and spread mappings must name existing columns.")
@@ -156,10 +238,11 @@ class FilterDashboard:
         self.method = w.Dropdown(description="Detection method", options=[(METHOD_LABELS[name], name) for name in METHODS], value=self.config.method)
         self.help = w.HTML()
         self.pending, self.status, self.kpis = w.HTML(), w.HTML(), w.HTML()
-        self.chart, self.statistics, self.method_output, self.explanation = w.Output(), w.Output(), w.Output(), w.Output()
+        self.chart, self.statistics, self.method_output, self.explanation = [w.Output(layout=w.Layout(width="100%")) for _ in range(4)]
         self.apply_button = w.Button(description="Apply filter", button_style="primary", icon="check")
-        self.compare_button = w.Button(description="Compare methods for this bond", icon="bar-chart")
-        self.export_button = w.Button(description="Export applied review", icon="download", disabled=True)
+        self.compare_button = w.Button(description="Compare methods", icon="bar-chart", layout=w.Layout(width="170px"),
+                                       tooltip="Compare all methods on the selected bond using the last applied settings.")
+        self.export_button = w.Button(description="Export review", icon="download", disabled=True, tooltip="Save annotations, statistics, charts and settings from the last successful Apply.")
         self.export_path = w.Text(value="reports/jump_filter", description="Export folder")
         self.params, self._param_sliders, self._param_cards, param_cards = {}, {}, {}, []
         # UI LOGIC: Every numerical slider has a synchronized input box for exact values.
@@ -179,12 +262,15 @@ class FilterDashboard:
         for name, label, lower, upper, step, kind in specs:
             value = getattr(self.config, name)
             slider_cls, input_cls = (w.IntSlider, w.BoundedIntText) if kind == "int" else (w.FloatSlider, w.BoundedFloatText)
-            slider = slider_cls(value=value, min=min(lower, value), max=max(upper, value), step=step, readout=False, continuous_update=False)
-            number = input_cls(value=value, min=min(lower, value), max=max(upper, value), step=step)
+            slider = slider_cls(value=value, min=min(lower, value), max=max(upper, value), step=step, readout=False,
+                                continuous_update=False, description=label, tooltip=PARAMETER_HELP[name], style={"description_width": "0px"})
+            number = input_cls(value=value, min=min(lower, value), max=max(upper, value), step=step,
+                               description=label, tooltip="Exact value. " + PARAMETER_HELP[name], style={"description_width": "0px"})
             w.link((slider, "value"), (number, "value"))
             self.params[name] = number
             self._param_sliders[name] = slider
-            card = w.VBox([w.HTML(f'<div class="jf-param-title">{escape(label)}</div>'), slider, number,
+            values_row = w.HBox([slider, number], layout=w.Layout(width="100%")).add_class("jf-param-values")
+            card = w.VBox([w.HTML(f'<div class="jf-param-title">{escape(label)}</div>'), values_row,
                            w.HTML(f'<p class="jf-help">{escape(PARAMETER_HELP[name])}</p>')]).add_class("jf-param")
             self._param_cards[name] = card
             param_cards.append(card)
@@ -209,26 +295,40 @@ class FilterDashboard:
         self.compare_button.on_click(self.compare)
         self.export_button.on_click(self.export)
         self.tabs = w.Tab(children=[self.chart, self.statistics, self.method_output, self.explanation])
-        for i, name in enumerate(["Trade review", "Statistical dashboard", "Method comparison", "Method & mathematics"]):
+        for i, name in enumerate(["Trade review", "Statistics", "Comparison", "Method & mathematics"]):
             self.tabs.set_title(i, name)
-        hero = w.HTML('<div class="jf-hero"><div class="jf-eyebrow">Bond trade quality</div><h2>Jump Filter</h2><p>Review unusual trade spreads with robust local evidence. Preserve genuine spread moves and inspect the reason for every flag.</p></div>')
-        note = w.HTML('<p class="jf-help">Historical fit screening can use earlier and later trades. Offline methods are available alongside Causal EWMA as an online comparator. CUSIP, time and spread identify statistical anomalies; they cannot determine retail, distress or commission causes. Open Method &amp; mathematics to inspect equations, examples and parameter effects before applying a method.</p>')
+        hero = w.HTML('<div class="jf-hero"><div class="jf-hero-top"><div class="jf-eyebrow">Bond research / trade quality</div><span class="jf-badge">Jupyter workbench</span></div><h2>Jump Filter</h2><p>Screen noisy trades. Preserve meaningful moves. Review every flag against its local evidence.</p></div>')
+        note = w.HTML('<details class="jf-note"><summary>How to interpret this review</summary><p>Historical fit screening can use earlier and later trades. Offline methods are available alongside Causal EWMA as an online comparator. CUSIP, time and spread identify statistical anomalies; they cannot determine retail, distress or commission causes. Method &amp; mathematics contains every equation, numerical example and parameter effect.</p></details>')
         calendar = w.VBox([self._row(self.time_basis, self.session_timezone), self._row(self.session_open, self.session_close), self.holidays,
                            w.HTML('<p class="jf-help">Trading time compresses scheduled nights, weekends and listed holidays while retaining inactivity during open sessions. The session calendar is a configurable research assumption. In trading mode, horizon and max_gap measure cumulative open time. Charts always use actual UTC timestamps. Supply an authoritative session_schedule for exact holidays and early closes.</p>')])
         parameter_grid = w.Box(param_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
         settings = w.Accordion(children=[w.VBox([parameter_grid, self._row(self.horizon, self.max_gap)]), calendar], selected_index=None)
-        settings.set_title(0, "Hyperparameters · sliders and exact inputs")
-        settings.set_title(1, "Trading calendar · nights, weekends and liquidity gaps")
+        settings.set_title(0, "Tune detection · relevant parameters and exact values")
+        settings.set_title(1, "Trading calendar · sessions, closures and gaps")
+        self.pending.add_class("jf-state-area")
+        actions = self._row(self.apply_button, self.compare_button, self.pending).add_class("jf-actionbar")
+        selection = w.VBox([self._row(self.cusip, self.method), self.help]).add_class("jf-selection")
+        export_row = self._row(self.export_path, self.export_button).add_class("jf-export")
         self.widget = w.VBox([w.HTML("<style>" + STYLE + "</style>"), hero,
-                              self._row(self.cusip, self.method), self.help, settings, note,
-                              self._row(self.apply_button, self.compare_button), self.pending, self.status, self.kpis, self.tabs,
-                              self._row(self.export_path, self.export_button)]).add_class("jf-workbench")
+                              selection, actions, settings, self.status, self.kpis, self.tabs, note, export_row],
+                              layout=w.Layout(width="100%", max_width="1500px")).add_class("jf-workbench")
+        self._empty_outputs()
         self._help_changed()
         self._pending_changed()
 
     def _row(self, *children):
         # UI LOGIC: Wrapping respects notebook pane width rather than browser viewport width.
         return self.w.Box(list(children), layout=self.w.Layout(display="flex", flex_flow="row wrap", width="100%")).add_class("jf-row")
+
+    def _empty_outputs(self):
+        # UI LOGIC: The first view explains the next action and gives each empty results tab a useful purpose.
+        from IPython.display import HTML, display
+        prompts = [(self.chart, "Ready to review", "Choose a bond and method, then Apply filter to see trades and outlier flags."),
+                   (self.statistics, "Statistics follow your applied review", "Coverage, fitting retention and liquidity diagnostics will appear here."),
+                   (self.method_output, "Compare detection methods", "Apply a filter, then Compare methods to inspect sensitivity on the selected bond.")]
+        for output, title, message in prompts:
+            with output:
+                display(HTML(f'<div class="jf-empty"><strong>{escape(title)}</strong>{escape(message)}</div>'))
 
     def _state(self):
         # UI LOGIC: Only algorithm settings determine pending state; view focus and export path do not.
@@ -246,7 +346,10 @@ class FilterDashboard:
 
     def _help_changed(self, _=None):
         # UI LOGIC: Show and enable only parameters used by the currently selected method.
-        self.help.value = '<p class="jf-help">' + escape(METHOD_HELP[self.method.value]) + '</p>'
+        card = METHOD_EXPLANATIONS[self.method.value]
+        mode = card["mode"].partition(" · ")[0]
+        self.help.value = (f'<div class="jf-method-context"><span class="jf-badge">{escape(mode)}</span>'
+                           '<p class="jf-help">' + escape(METHOD_HELP[self.method.value]) + '</p></div>')
         for control in [self.session_timezone, self.session_open, self.session_close, self.holidays]:
             control.disabled = self.busy or self.session_schedule is not None or self.time_basis.value == "wall"
         relevant = METHOD_EXPLANATIONS[self.method.value]["parameters"]
@@ -256,36 +359,66 @@ class FilterDashboard:
             self._param_cards[name].layout.display = "" if name in relevant else "none"
 
     def _render_explanation(self):
-        # UI LOGIC: Math display objects render equations natively; explanations always follow pending selection.
+        # UI LOGIC: Group native mathematics into progressive sections without removing any formula or example.
         from IPython.display import HTML, Math, display
         card = METHOD_EXPLANATIONS[self.method.value]
         applied = self.applied_config.method if self.applied_config else "none yet"
+        groups = [("Detection method · equations and worked example", card["steps"]),
+                  ("Shared preparation · timestamps, cohorts and support", COMMON_STEPS),
+                  ("Trading clock · irregular events and session boundaries", CLOCK_STEPS),
+                  ("Fitting policy · eligibility and suggested influence weights", FITTING_STEPS)]
+        sections = []
+        for index, (_, steps) in enumerate(groups):
+            section = self.w.Output(layout=self.w.Layout(width="100%")).add_class("jf-math-section")
+            with section:
+                for title, prose, formula in steps:
+                    display(HTML(f'<h4>{escape(title)}</h4><p>{escape(prose)}</p>'))
+                    for block in math_display_blocks(formula):
+                        display(Math(block))
+                if index == 0:
+                    title, url = card["reference"]
+                    display(HTML(f'<div class="jf-example"><h4>Worked numerical example</h4><p>{escape(card["example"])}</p></div>'
+                                 f'<h4>Assumptions and limitations</h4><p>{escape(card["tradeoffs"])}</p>'
+                                 f'<p class="jf-help">Reference: <a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{escape(title)}</a></p>'))
+            sections.append(section)
+        # UI LOGIC: The parameter audit follows the current selection; charts and exports keep their applied snapshot.
+        parameters = self.w.Output(layout=self.w.Layout(width="100%")).add_class("jf-math-section")
+        rows = [(name, self.params[name].value, PARAMETER_HELP[name]) for name in card["parameters"]]
+        rows += [("horizon", self.horizon.value, "Maximum reference distance in the selected clock"),
+                 ("max_gap", self.max_gap.value, "Reference break gap in the selected clock"),
+                 ("time_basis", self.time_basis.value, "Trading exposure or wall-clock distance"),
+                 ("session_timezone", self.session_timezone.value, "Market calendar timezone"),
+                 ("session_open", self.session_open.value, "Weekday regular open"),
+                 ("session_close", self.session_close.value, "Weekday regular close"),
+                 ("holidays", self.holidays.value, "Explicit full-day closures")]
+        with parameters:
+            display(HTML(_table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"]))))
+            if self.session_schedule is not None:
+                display(HTML('<p class="jf-help">An authoritative session_schedule was supplied; trading mode uses only its intervals and overrides weekday calendar controls.</p>' + _table_html(self.session_schedule)))
+        sections.append(parameters)
+        accordion = self.w.Accordion(children=sections, selected_index=0)
+        for index, (title, _) in enumerate(groups):
+            accordion.set_title(index, title)
+        accordion.set_title(4, "Selected parameter values · complete audit")
         with self.explanation:
             self.explanation.clear_output(wait=True)
             display(HTML(f'<h3>{escape(card["name"])}</h3><p class="jf-help">{escape(card["mode"])} · Explanation: selected method {escape(self.method.value)} · Applied plots/exports: {escape(applied)}</p><p>{escape(card["summary"])}</p>'))
-            steps = COMMON_STEPS + CLOCK_STEPS + card["steps"] + FITTING_STEPS
-            for title, prose, formula in steps:
-                display(HTML(f'<h4>{escape(title)}</h4><p>{escape(prose)}</p>'))
-                for block in math_display_blocks(formula):
-                    display(Math(block))
-            display(HTML(f'<h4>Numerical example</h4><p>{escape(card["example"])}</p><h4>Assumptions and limitations</h4><p>{escape(card["tradeoffs"])}</p>'))
-            rows = [(name, self.params[name].value, PARAMETER_HELP[name]) for name in card["parameters"]]
-            rows += [("time_basis", self.time_basis.value, "Trading exposure or wall-clock distance"),
-                     ("session_timezone", self.session_timezone.value, "Market calendar timezone"),
-                     ("session_open", self.session_open.value, "Weekday regular open"),
-                     ("session_close", self.session_close.value, "Weekday regular close"),
-                     ("holidays", self.holidays.value, "Explicit full-day closures")]
-            display(HTML('<h4>Selected parameters</h4>' + _table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"])) ))
-            title, url = card["reference"]
-            display(HTML(f'<p class="jf-help">Reference: <a href="{escape(url, quote=True)}" target="_blank">{escape(title)}</a></p>'))
-            if self.session_schedule is not None:
-                display(HTML('<p class="jf-help">An authoritative session_schedule was supplied; trading mode uses only its intervals and overrides weekday calendar controls.</p>' + _table_html(self.session_schedule)))
+            display(accordion)
+        # UI LOGIC: Release superseded widget models after replacing their views, avoiding stale math/control audits.
+        previous_widgets = self._explanation_widgets
+        self._explanation_widgets = (*sections, accordion)
+        for previous_widget in previous_widgets:
+            previous_widget.close()
 
     def _pending_changed(self, _=None):
         # UI LOGIC: Reverting edits restores the applied badge without running algorithms.
-        label = "Choose settings and Apply." if self.result is None else (
-            "Pending settings · Apply to update plots and exports." if self._state() != self._applied_state else "Applied · plots and exports match these settings.")
-        self.pending.value = '<div class="jf-pending">' + label + '</div>'
+        if self.result is None:
+            state, badge, label = "ready", "Ready", "Choose settings and Apply."
+        elif self._state() != self._applied_state:
+            state, badge, label = "pending", "Pending settings", "Apply to update plots and exports."
+        else:
+            state, badge, label = "applied", "Applied", "Plots and exports match these settings."
+        self.pending.value = f'<div class="jf-state jf-state-{state}"><span class="jf-badge">{badge}</span>{label}</div>'
         self._help_changed()
         self._render_explanation()
 
@@ -322,21 +455,44 @@ class FilterDashboard:
         self.kpis.value = _kpi_html(evaluation_summary(selected))
         with self.chart:
             self.chart.clear_output(wait=True)
-            display(HTML('<p class="jf-help">All timed finite trades for this bond are drawn. Red crosses are statistical outliers; amber markers are level changes or provisional jumps.</p>'))
+            display(HTML('<div class="jf-section-heading"><h4>Spread history &amp; review flags</h4><span class="jf-help">Actual trade timestamps · UTC</span></div>'))
             display(figure)
+            display(HTML('<p class="jf-help">All timed finite trades are shown. Red crosses indicate statistical outliers; amber markers identify level changes or provisional jumps. Hover for scores, reference support and the reason for each decision.</p>'))
+        # UI LOGIC: Keep the liquidity chart immediately visible and progressively disclose the complete audit tables.
+        audits = audit_tables(selected)
+        support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
+                           "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
+        overview_columns = [self.mapping["cusip_col"], "rows", "evaluated", "flagged", "fit_eligible", "flagged_rate", "coverage"]
+        overview = summary[[name for name in overview_columns if name in summary]]
+        full_summary = ('<details class="jf-note"><summary>Full bond statistics · all diagnostic columns</summary>' +
+                        _table_html(summary) + '</details>')
+        groups = [("All bonds · evaluation and fitting coverage", '<h4>Bond overview · applied method</h4>' + _table_html(overview) + full_summary +
+                   '<h4>All bonds · fitting coverage and retention</h4>' + _table_html(fitting) +
+                   '<p class="jf-help">Hard fit: jf_fit_eligible / status ok and unflagged. Soft fit: status ok or outlier with positive suggested influence weight. Provisional jumps, ambiguous transitions, invalid inputs, unsupported rows and solver failures are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size.</p>'),
+                  ("Selected bond · daily support and decision reasons", '<h4>Observed daily support</h4>' + _table_html(audits["daily"]) +
+                   '<h4>Flag and support reasons</h4>' + _table_html(audits["reasons"])),
+                  ("Selected bond · liquidity and local uncertainty", _table_html(selected[[name for name in support_columns if name in selected]])),
+                  ("Selected bond · complete trade audit", _table_html(selected))]
+        sections = []
+        for _, contents in groups:
+            section = self.w.Output(layout=self.w.Layout(width="100%"))
+            with section:
+                display(HTML(contents))
+            sections.append(section)
+        accordion = self.w.Accordion(children=sections, selected_index=0)
+        for index, (title, _) in enumerate(groups):
+            accordion.set_title(index, title)
         with self.statistics:
             self.statistics.clear_output(wait=True)
-            display(HTML('<h4>All bonds · applied method</h4>' + _table_html(summary)))
-            display(HTML('<h4>All bonds · fitting coverage and retention</h4>' + _table_html(fitting)))
-            display(HTML('<p class="jf-help">Hard fit: jf_fit_eligible / status ok and unflagged. Soft fit: status ok or outlier with positive suggested influence weight. Provisional jumps, ambiguous transitions, invalid inputs, unsupported rows and solver failures are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size.</p>'))
+            display(HTML('<div class="jf-section-heading"><h4>Liquidity &amp; local uncertainty</h4><span class="jf-help">Selected bond · applied method</span></div>'))
             display(diagnostic)
-            audits = audit_tables(selected)
-            display(HTML('<h4>Selected bond · observed daily support</h4>' + _table_html(audits["daily"])))
-            display(HTML('<h4>Selected bond · flag and support reasons</h4>' + _table_html(audits["reasons"])))
-            support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
-                               "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
-            display(HTML('<h4>Selected bond · liquidity and local uncertainty diagnostics</h4>' + _table_html(selected[[name for name in support_columns if name in selected]])))
-            display(HTML('<h4>Selected bond · trade audit</h4>' + _table_html(selected)))
+            display(HTML('<p class="jf-help">Review support density and uncertainty before using flags for fitting. Expand a section below for exact counts and original-order trade diagnostics.</p>'))
+            display(accordion)
+        # UI LOGIC: Keep expandable views alive while closing every superseded statistics widget.
+        previous_statistics = self._statistics_widgets
+        self._statistics_widgets = (*sections, accordion)
+        for previous_widget in previous_statistics:
+            previous_widget.close()
         # UI LOGIC: Keep live plot models referenced and close superseded views after publishing replacements.
         previous_widgets = self._figure_widgets
         self._figure_widgets = (figure, diagnostic)
@@ -366,7 +522,7 @@ class FilterDashboard:
             self.status.value = f'<div class="jf-status">Applied {escape(config.method)} to {len(result):,} supplied rows. Charts focus on {escape(str(self.cusip.value))}.</div>'
         except Exception as exc:
             self.applied_config = previous
-            self.status.value = '<div class="jf-status">Could not apply settings: ' + escape(str(exc)) + '</div>'
+            self.status.value = '<div class="jf-status jf-status-error">Could not apply settings: ' + escape(str(exc)) + '</div>'
         finally:
             self._lock(False)
             self._pending_changed()
@@ -377,6 +533,7 @@ class FilterDashboard:
         if self.result is None or self.busy:
             return
         self._publish(*self._render(self.result))
+        self.status.value = f'<div class="jf-status">Viewing {escape(str(self.cusip.value))} · applied {escape(self.applied_config.method)} · {len(self.result):,} supplied rows.</div>'
         self.comparison = None
         self.method_output.clear_output()
         self._clear_comparison_widget()
@@ -408,7 +565,7 @@ class FilterDashboard:
             self.comparison = table
             self.tabs.selected_index = 2
         except Exception as exc:
-            self.status.value = '<div class="jf-status">Could not compare methods: ' + escape(str(exc)) + '</div>'
+            self.status.value = '<div class="jf-status jf-status-error">Could not compare methods: ' + escape(str(exc)) + '</div>'
         finally:
             self._lock(False)
 
@@ -442,7 +599,7 @@ class FilterDashboard:
             self.status.value = '<div class="jf-status">Saved applied review: ' + escape(str(output.resolve())) + '</div>'
             return output
         except Exception as exc:
-            self.status.value = '<div class="jf-status">Could not export: ' + escape(str(exc)) + '</div>'
+            self.status.value = '<div class="jf-status jf-status-error">Could not export: ' + escape(str(exc)) + '</div>'
             return None
 
     def _ipython_display_(self):

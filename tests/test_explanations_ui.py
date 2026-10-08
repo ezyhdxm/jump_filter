@@ -129,6 +129,40 @@ def test_notebook_pending_help_and_calendar_preserve_applied_snapshot(monkeypatc
     assert not panel._param_sliders["reversion_tolerance"].disabled
 
 
+@pytest.mark.parametrize("method", METHODS)
+def test_notebook_all_methods_keep_relevant_controls_and_two_way_numeric_links(method, monkeypatch):
+    # TEST LOGIC: Presentation changes must retain the full method list and algorithm-specific input availability.
+    pytest.importorskip("ipywidgets")
+    from jump_filter.dashboard import FilterDashboard
+    explained = []
+    monkeypatch.setattr(FilterDashboard, "_render_explanation", lambda panel: explained.append(panel.method.value))
+    frame = pd.DataFrame({"CUSIP": ["A"], "time": ["2026-10-01T14:00:00Z"], "spread": [100.]})
+    panel = FilterDashboard(frame)
+    assert tuple(value for _, value in panel.method.options) == METHODS
+    panel.method.value = method
+    assert explained[-1] == method
+    assert panel.result is None
+    relevant = set(METHOD_EXPLANATIONS[method]["parameters"])
+    for name, number in panel.params.items():
+        assert number.disabled == (name not in relevant)
+        assert panel._param_sliders[name].disabled == (name not in relevant)
+
+    # TEST LOGIC: Every active integer or floating-point input synchronizes at both bounds without applying data changes.
+    for name in relevant:
+        number, slider = panel.params[name], panel._param_sliders[name]
+        number.value = number.min
+        assert slider.value == number.min
+        slider.value = slider.max
+        assert number.value == slider.max
+    assert panel.result is None
+
+    # TEST LOGIC: Computation locks all algorithm edits and restores only method-relevant inputs afterward.
+    panel._lock(True)
+    assert all(control.disabled for control in panel._controls)
+    panel._lock(False)
+    assert all(number.disabled == (name not in relevant) for name, number in panel.params.items())
+
+
 def test_browser_authoritative_schedule_is_applied_and_audited(monkeypatch):
     # TEST LOGIC: Inject local CSV bytes at the upload boundary; no network or private trade data are used.
     st = pytest.importorskip("streamlit")
