@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jump-filter"
+version = "0.1.0"
+description = "Auditable robust bond spread outlier screening and interactive dashboards"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "pandas>=2.2"]
+
+[project.optional-dependencies]
+dashboard = ["plotly>=5.18", "ipywidgets>=8", "ipython>=8", "nbformat>=5.9"]
+app = ["streamlit>=1.50", "plotly>=5.18"]
+parquet = ["pyarrow>=12"]
+dev = ["pytest>=8", "nbclient>=0.10", "build>=1"]
+
+[project.scripts]
+jump-filter = "jump_filter.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["jump_filter*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

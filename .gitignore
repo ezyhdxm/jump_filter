@@ -1,0 +1,19 @@
+# FILE IO LOGIC: keep credentials, proprietary data and generated state local.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+*.egg-info/
+build/
+dist/
+.DS_Store
+.env
+.streamlit/secrets.toml
+data/
+reports/
+*.csv
+*.parquet
+*.pkl
+*.log
+*.png

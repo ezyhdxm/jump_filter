@@ -1,0 +1,11 @@
+# CONFIGURATION LOGIC: legible shared theme for controls and research cards.
+[theme]
+base = "light"
+primaryColor = "#087f8c"
+backgroundColor = "#f4f7fb"
+secondaryBackgroundColor = "#edf3f8"
+textColor = "#19364b"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
