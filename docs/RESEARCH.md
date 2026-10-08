@@ -13,7 +13,7 @@ Consequently, an `outlier` flag means **suspect for fitting a local central spre
 ## Common time and scale conventions
 
 - Each CUSIP is analyzed independently after sorting timestamps. An observation from one bond never establishes another bond's reference.
-- Records at the same timestamp form a **cohort**. Centered methods exclude the entire target cohort from its reference neighborhood. This avoids self-inclusion and arbitrary dependence on input order for simultaneous trades.
+- Records at the same timestamp form a **cohort**. Centered local methods exclude the entire target cohort. The joint offline `robust_trend` baseline includes it with bounded influence; its local residual scale excludes it. Equal-time input order never defines evidence.
 - Each reference timestamp contributes its cohort's median spread. `window=31` caps the number of neighboring **distinct timestamps**, not raw trade records: at most 15 earlier and 16 later cohorts. Missing support on one side is not filled by adding more on the other. This prevents a burst of simultaneous prints from dominating the neighborhood merely because it has many rows.
 - `horizon="3D"` limits how far reference timestamps can lie from the target. Observation-count and elapsed-time bounds apply together; a sparse bond does not borrow arbitrarily old observations to fill its window.
 - `max_gap="1D"` starts a new segment after a longer trading gap. The resulting loss of reference coverage is explicit. It is safer to abstain than to infer an execution anomaly solely from a stale pre-gap level.
@@ -24,7 +24,15 @@ Centered methods are retrospective: later trades can change earlier references a
 
 ## Implemented methods
 
-The five methods below share input validation, CUSIP separation, timestamp cohorts, gap segmentation, abstention, and diagnostic output. They offer different evidence for excluding a print. A threshold score is a diagnostic statistic, not a calibrated probability that a trade is bad.
+The nine available methods share input validation, CUSIP separation, timestamp cohorts, gap segmentation, abstention, and diagnostic output. The original five are detailed below; [offline extensions](OFFLINE_METHODS.md) and [all nine mathematical explanations](MATHEMATICS.md) describe the added IQR, multiscale, independent-side local trend and joint Huber-TV methods. A threshold score is a diagnostic statistic, not a calibrated probability that a trade is bad.
+
+### Trading sessions and uncertain turns
+
+In trading-clock mode use $\tau(t)=\int_{t_0}^t 1_{\text{open session}}(u)du$ wherever a local method uses time: neighborhood limits, regression coordinates and gap segmentation. In wall mode use UTC elapsed time. Compression removes only explicit closures; open-market inactivity retains its duration. An authoritative timezone-aware interval table supports holidays, early closes, split or overnight sessions. The default weekday hours are configurable research assumptions. [SIFMA's fixed-income recommendations](https://www.sifma.org/resources/general/holiday-schedule) include full and early closes; a stock-exchange calendar need not represent these sessions. We do not infer a holiday schedule from missing trades.
+
+Compression is not evidence that the market level stayed unchanged overnight. `local_piecewise` fits independent robust lines on each side of a target, projects both to its clock time, and permits different slopes. A continuous peak can have opposite slopes but agreeing projected levels. With projections $p_L,p_R$, set $b=(p_L+p_R)/2$, $\sigma=\max(s_L,s_R,a/q)$, and require $|p_R-p_L|\le\max(a,v\sigma)$ before evaluating a residual. Disagreement receives `ambiguous_transition`, zero weight and no hard-fit eligibility. This protects uncertain genuine repricing by abstention rather than calling it clean or labeling it an execution error. Curvature, contaminated sides and liquidity shifts can still reduce coverage.
+
+Reference count divided by reference-clock span is a density diagnostic; the method-specific local scale is a noise diagnostic. Their response to liquidity changes is explicit, but they do not identify transaction costs. The joint Huber-TV method uses **unweighted first ordered differences**, promoting locally constant levels rather than a second-order smooth curve. [Tibshirani et al. (2005)](https://web.stanford.edu/group/SOL/papers/fused-lasso-JRSSB.pdf) motivate this local-constancy penalty; our robust-loss implementation is an adaptation. Its convergence checks and sensitivity are documented in the offline notes.
 
 ### 1. `hampel`: local median and MAD
 

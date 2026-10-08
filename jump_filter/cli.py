@@ -21,6 +21,7 @@ def main():
     parser.add_argument("--method", choices=METHODS, default="consensus")
     parser.add_argument("--config", type=Path, help="JSON FilterConfig overrides")
     parser.add_argument("--summary", type=Path)
+    parser.add_argument("--session-schedule", type=Path, help="CSV with aware open/close session boundaries")
     arguments = parser.parse_args()
     options = json.loads(arguments.config.read_text()) if arguments.config else {}
     options.setdefault("method", arguments.method)
@@ -30,9 +31,19 @@ def main():
         frame = pd.read_parquet(arguments.input)
     else:
         frame = pd.read_csv(arguments.input, dtype={arguments.cusip_col: "string"})
+    schedule = pd.read_csv(arguments.session_schedule) if arguments.session_schedule else None
+
+    # Input: frame CUSIP=['A','A','A'],time=['2026-09-14T13:00Z','2026-09-14T14:00Z',
+    # '2026-09-14T15:00Z'],spread=[100,130,100],options={method:'hampel',window:3,min_neighbors:2} ->
+    # Output: original3rows plus jf_is_outlier=[False,True,False],jf_baseline=[115,100,115],
+    # jf_weight=[1,1/30,1] (baselines/weights up to floating-point precision).
+    # Trick: filtering annotates the original rows; file serialization happens only afterward.
+    # CORE LOGIC: STEP 1
     annotated = filter_trades(frame, FilterConfig(**options), cusip_col=arguments.cusip_col,
                               time_col=arguments.time_col, spread_col=arguments.spread_col,
-                              timezone=arguments.timezone)
+                              timezone=arguments.timezone, session_schedule=schedule)
+
+    # FILE IO LOGIC: serialize original-order annotations and optional per-bond counts.
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     if arguments.output.suffix.lower() == ".parquet":
         annotated.to_parquet(arguments.output, index=False)

@@ -12,7 +12,10 @@ RED = "#db4759"
 AMBER = "#bc7b19"
 METHOD_LABELS = {
     "hampel": "Local Hampel", "local_linear": "Robust local linear",
-    "jump_reversion": "Jump and reversion", "causal_ewma": "Causal robust EWMA",
+    "rolling_iqr": "Rolling IQR fences", "multiscale": "Multiscale Hampel confirmation",
+    "local_piecewise": "Two-sided local piecewise trend",
+    "robust_trend": "Offline robust TV trend",
+    "jump_reversion": "Jump and reversion", "causal_ewma": "Causal robust EWMA · optional online",
     "consensus": "Conservative consensus",
 }
 
@@ -41,7 +44,7 @@ def _band_coordinates(rows, max_gap):
     previous, gap = None, pd.Timedelta(max_gap)
     for _, row in rows.iterrows():
         timestamp, baseline, cutoff = row["jf_time"], row["jf_baseline"], row["jf_threshold"]
-        if previous is not None and timestamp - previous > gap:
+        if previous is not None and (timestamp - previous > gap or bool(row.get("jf_session_boundary", False))):
             for values in coordinates:
                 values.append(None)
         for values, value in zip(coordinates, [timestamp, baseline, baseline + cutoff, baseline - cutoff, cutoff]):
@@ -68,15 +71,25 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
     hover = np.column_stack([
         rows["jf_row_id"].astype(str), rows[cusip_col].astype(str), rows["jf_status"],
         rows["jf_reason"], rows["jf_score"].round(3), rows["jf_n_reference"],
+        rows.get("jf_reference_density_per_hour", pd.Series(np.nan, index=rows.index)).round(3),
+        rows.get("jf_local_volatility", rows["jf_scale"]).round(4),
+        rows.get("jf_gap_minutes", pd.Series(np.nan, index=rows.index)).round(2),
+        rows.get("jf_wall_gap_minutes", pd.Series(np.nan, index=rows.index)).round(2),
+        rows.get("jf_session_boundary", pd.Series(False, index=rows.index)).astype(str),
     ])
     hover_text = ("CUSIP %{customdata[1]}<br>%{x}<br>Spread %{y:.4f} " + unit +
                   "<br>Status %{customdata[2]}<br>Score %{customdata[4]}<br>References %{customdata[5]}"
+                  "<br>Reference cohorts/hour %{customdata[6]}<br>Local volatility %{customdata[7]} " + unit +
+                  "<br>Previous active-clock gap %{customdata[8]} minutes"
+                  "<br>Previous wall-clock gap %{customdata[9]} minutes<br>Session boundary %{customdata[10]}"
                   "<br>Row position %{customdata[0]}<br>%{customdata[3]}<extra></extra>")
     evaluated = rows["jf_status"].isin(["ok", "outlier", "provisional_jump"])
+    ambiguous = rows["jf_status"].eq("ambiguous_transition")
     classes = [
-        ("Evaluated / unflagged", ~rows["jf_is_outlier"] & evaluated, TEAL, "circle", 6),
-        ("Insufficient / invalid support", ~rows["jf_is_outlier"] & ~evaluated, "#94a3b3", "circle-open", 7),
-        ("Flagged outlier", rows["jf_is_outlier"], RED, "x", 10),
+        ("Evaluated", ~rows["jf_is_outlier"] & evaluated, TEAL, "circle", 6),
+        ("Unscored", ~rows["jf_is_outlier"] & ~evaluated & ~ambiguous, "#94a3b3", "circle-open", 7),
+        ("Ambiguous turn", ambiguous, AMBER, "diamond-open", 9),
+        ("Outlier", rows["jf_is_outlier"], RED, "x", 10),
     ]
     for label, mask, color, symbol, size in classes:
         # PLOTTING LOGIC: Outliers remain visible at their original spread values.
@@ -86,18 +99,18 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
     # PLOTTING LOGIC: The raw-unit cutoff band is diagnostic; line breaks preserve inactive sessions.
     band_time, baseline, upper, lower, raw_cutoff = _band_coordinates(rows, max_gap)
     figure.add_trace(go.Scatter(x=band_time, y=upper, mode="lines", line=dict(width=0),
-                               name="Local cutoff band", showlegend=False, hoverinfo="skip", connectgaps=False), row=1, col=1)
+                               name="Cutoff band", showlegend=False, hoverinfo="skip", connectgaps=False), row=1, col=1)
     figure.add_trace(go.Scatter(x=band_time, y=lower, mode="lines", line=dict(width=0),
-                               fill="tonexty", fillcolor="rgba(8,127,140,.08)", name="Local cutoff band",
+                               fill="tonexty", fillcolor="rgba(8,127,140,.08)", name="Cutoff band",
                                hoverinfo="skip", connectgaps=False), row=1, col=1)
     # PLOTTING LOGIC: Baselines are diagnostics rather than quoted executable mid prices.
-    figure.add_trace(go.Scatter(x=band_time, y=baseline, mode="lines", name="Robust baseline",
+    figure.add_trace(go.Scatter(x=band_time, y=baseline, mode="lines", name="Baseline",
                                line=dict(color=INK, width=1.8), connectgaps=False,
                                hovertemplate="%{x}<br>Baseline %{y:.4f} " + unit + "<extra></extra>"), row=1, col=1)
     regime = rows["jf_regime_change"].fillna(False)
     provisional = rows["jf_status"].eq("provisional_jump")
-    for label, mask, symbol in [("Level change candidate", regime, "diamond-open"),
-                                ("Provisional jump", provisional, "triangle-up-open")]:
+    for label, mask, symbol in [("Level change", regime & ~ambiguous, "diamond-open"),
+                                ("Provisional", provisional, "triangle-up-open")]:
         figure.add_trace(go.Scatter(x=rows.loc[mask, "jf_time"], y=value.loc[mask], mode="markers", name=label,
                                    marker=dict(color=AMBER, symbol=symbol, size=12, line=dict(width=2)),
                                    customdata=hover[mask.to_numpy()], hovertemplate=hover_text), row=1, col=1)
@@ -113,16 +126,18 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
     figure.update_yaxes(title_text=f"Spread · {unit}", row=1, col=1)
     figure.update_yaxes(title_text=f"Residual · {unit}", row=2, col=1)
     figure.update_xaxes(title_text="Time · UTC", row=2, col=1)
-    figure.update_layout(title=dict(text=title or "Selected bond", font=dict(size=17), x=.02))
+    # PLOTTING LOGIC: Short legends and a two-line title remain readable in a narrow research pane.
+    heading = title.replace(" · ", "<br>", 1) if title else "Selected bond"
+    figure.update_layout(title=dict(text=heading, font=dict(size=17), x=.02))
     return _style(figure, height=760, trade=True)
 
 
 def diagnostic_figure(annotated, *, spread_col="spread", unit="bp"):
-    """Contrast retained and flagged deviations and show status coverage."""
+    """Contrast unflagged/flagged diagnostics without implying fit eligibility."""
     # PLOTTING LOGIC: Histogram counts use all finite residuals, without trimming tails.
     figure = make_subplots(rows=1, cols=2, subplot_titles=("Residual distribution", "Evaluation coverage"),
                            column_widths=[.65, .35], horizontal_spacing=.12)
-    for flag, label, color in [(False, "Retained / reviewed", TEAL), (True, "Flagged outlier", RED)]:
+    for flag, label, color in [(False, "Unflagged diagnostic", TEAL), (True, "Flagged outlier", RED)]:
         rows = annotated.loc[annotated["jf_is_outlier"].eq(flag)]
         figure.add_trace(go.Histogram(x=rows["jf_residual"], name=label, marker_color=color,
                                      opacity=.75, nbinsx=45), row=1, col=1)

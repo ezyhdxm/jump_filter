@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from jump_filter import FilterConfig, METHODS, filter_trades, make_demo, summarize
+from jump_filter import FilterConfig, METHODS, filter_trades, make_demo, select_fit_data, summarize
 
 
 # TEST LOGIC: Build small labeled frames without sharing mutable inputs.
@@ -34,6 +34,7 @@ def test_public_methods_preserve_input_and_duplicate_index(method):
     required = {
         "jf_is_outlier", "jf_score", "jf_baseline", "jf_scale", "jf_status",
         "jf_regime_change", "jf_weight", "jf_n_reference", "jf_time", "jf_row_id",
+        "jf_fit_eligible",
     }
     assert required <= set(result.columns)
     assert result["jf_row_id"].is_unique
@@ -89,7 +90,8 @@ def test_equal_timestamp_order_invariance(method):
         mixed.set_index("source_row")[columns].sort_index(),
     )
     cohort = direct.loc[direct["source_row"].isin([30, 60])]
-    np.testing.assert_allclose(cohort["jf_baseline"], 100.0)
+    tolerance = 0.02 if method == "robust_trend" else 1e-10
+    np.testing.assert_allclose(cohort["jf_baseline"], 100.0, atol=tolerance)
     assert cohort["jf_is_outlier"].all()
 
 
@@ -126,7 +128,8 @@ def test_flat_series_and_isolated_spike(method):
     frame.loc[45, "spread"] = 130.0
     result = filter_trades(frame, FilterConfig(method=method))
     assert result.loc[45, "jf_is_outlier"]
-    assert result.loc[45, "jf_baseline"] == pytest.approx(100.0)
+    tolerance = 0.02 if method == "robust_trend" else 1e-10
+    assert result.loc[45, "jf_baseline"] == pytest.approx(100.0, abs=tolerance)
     assert np.isfinite(result.loc[45, "jf_score"])
     assert result["jf_is_outlier"].sum() == 1
 
@@ -188,7 +191,7 @@ def test_scale_equivariance(method):
         FilterConfig(method=method, abs_floor=0.01, reversion_tolerance=2.0),
     )
     pd.testing.assert_series_equal(original["jf_is_outlier"], scaled["jf_is_outlier"])
-    np.testing.assert_allclose(original["jf_score"], scaled["jf_score"], equal_nan=True, rtol=1e-8)
+    np.testing.assert_allclose(original["jf_score"], scaled["jf_score"], equal_nan=True, rtol=1e-8, atol=1e-10)
     np.testing.assert_allclose(original["jf_baseline"] * 0.01, scaled["jf_baseline"], equal_nan=True)
 
 
@@ -295,3 +298,327 @@ def test_smooth_trend_with_spikes_regression(method):
     assert result.loc[[30, 95], "jf_is_outlier"].all()
     assert result["jf_is_outlier"].sum() == 2
     assert not result.loc[40:80, "jf_regime_change"].any()
+
+
+# TEST LOGIC: Historical fitting uses future observations; causal EWMA remains an explicit option.
+@pytest.mark.parametrize("method", ["hampel", "rolling_iqr", "local_linear", "local_piecewise", "jump_reversion", "multiscale", "robust_trend", "consensus"])
+def test_retrospective_methods_can_use_later_support(method):
+    frame = trades(np.full(70, 100.0))
+    frame.loc[4, "spread"] = 125.0
+    full = filter_trades(frame, FilterConfig(method=method))
+    prefix = filter_trades(frame.iloc[:5], FilterConfig(method=method))
+    assert full.loc[4, "jf_is_outlier"]
+    assert full.loc[4, "jf_fit_eligible"] == False
+    assert prefix["jf_fit_eligible"].eq(False).all()
+    assert not prefix["jf_is_outlier"].any()
+
+
+# TEST LOGIC: Invalid values abstain consistently for each new algorithm, not only the default.
+@pytest.mark.parametrize("method", METHODS)
+def test_each_method_marks_invalid_and_unsupported_rows_ineligible(method):
+    frame = trades(np.full(50, 100.0))
+    frame.loc[5, "spread"] = np.nan
+    frame.loc[7, "CUSIP"] = None
+    result = filter_trades(frame, FilterConfig(method=method))
+    invalid = result.loc[[5, 7]]
+    assert invalid["jf_status"].eq("invalid_input").all()
+    assert invalid["jf_fit_eligible"].eq(False).all()
+    assert invalid["jf_weight"].eq(0).all()
+    expected = result["jf_status"].eq("ok") & ~result["jf_is_outlier"]
+    pd.testing.assert_series_equal(result["jf_fit_eligible"], expected, check_names=False)
+
+
+# TEST LOGIC: Short calendar gaps keep legitimate support; a max-gap reset is strictly larger.
+@pytest.mark.parametrize("method", METHODS)
+def test_short_gaps_do_not_reset_reference_support(method):
+    frame = trades(np.full(70, 100.0))
+    frame.loc[35:, "time"] += pd.Timedelta("2h")
+    frame.loc[36, "spread"] = 130.0
+    result = filter_trades(frame, FilterConfig(method=method, max_gap="1D"))
+    assert result.loc[36, "jf_is_outlier"]
+    assert result.loc[36, "jf_n_reference"] >= 6
+    assert result.loc[34, "jf_fit_eligible"]
+
+
+# TEST LOGIC: Genuine steep trends should remain eligible under explicit trend-aware methods.
+@pytest.mark.parametrize("method", ["local_linear", "local_piecewise", "robust_trend", "consensus"])
+def test_steep_trend_with_isolated_premiums(method):
+    frame = trades(100 + 0.75 * np.arange(120))
+    frame.loc[35, "spread"] += 10.0
+    frame.loc[85, "spread"] -= 10.0
+    result = filter_trades(frame, FilterConfig(method=method))
+    assert result.loc[[35, 85], "jf_is_outlier"].all()
+    assert result.loc[45:70, "jf_fit_eligible"].all()
+
+
+# TEST LOGIC: Dimensionless method controls retain decisions and numerical scale after unit changes.
+@pytest.mark.parametrize("method", ["rolling_iqr", "multiscale", "robust_trend"])
+def test_new_methods_scale_equivariance_with_nondefault_controls(method):
+    frame = trades(100 + 0.1 * np.arange(80) + 0.1 * np.sin(np.arange(80)))
+    frame.loc[42, "spread"] += 15.0
+    controls = {"iqr_multiplier": 2.0, "multiscale_votes": 3, "trend_penalty": 12.0, "huber_delta": 2.0}
+    original = filter_trades(frame, FilterConfig(method=method, abs_floor=1.0, **controls))
+    transformed = frame.copy()
+    transformed["spread"] = transformed["spread"] * 10.0 + 500.0
+    scaled = filter_trades(transformed, FilterConfig(method=method, abs_floor=10.0, **controls))
+    pd.testing.assert_series_equal(original["jf_is_outlier"], scaled["jf_is_outlier"])
+    pd.testing.assert_series_equal(original["jf_fit_eligible"], scaled["jf_fit_eligible"])
+    np.testing.assert_allclose(scaled["jf_baseline"], original["jf_baseline"] * 10 + 500, equal_nan=True, atol=0.01)
+    np.testing.assert_allclose(scaled["jf_score"], original["jf_score"], equal_nan=True, rtol=0.01, atol=0.01)
+
+
+# TEST LOGIC: Wider IQR fences must lower rejection on an unchanged reference population.
+def test_iqr_multiplier_controls_fence_width():
+    frame = trades(np.tile([98.0, 99.0, 100.0, 101.0, 102.0], 20))
+    frame.loc[50, "spread"] = 107.0
+    narrow = filter_trades(frame, FilterConfig(method="rolling_iqr", iqr_multiplier=1.0))
+    wide = filter_trades(frame, FilterConfig(method="rolling_iqr", iqr_multiplier=4.0))
+    assert narrow.loc[50, "jf_is_outlier"]
+    assert not wide.loc[50, "jf_is_outlier"]
+    assert wide.loc[50, "jf_threshold"] > narrow.loc[50, "jf_threshold"]
+
+
+# TEST LOGIC: Voting at more horizons must demand at least as much confirmation.
+def test_multiscale_vote_requirement_reduces_or_preserves_flags():
+    frame = trades(100 + 0.2 * np.sin(np.arange(120) / 7))
+    frame.loc[30:35, "spread"] += 10.0
+    frame.loc[80, "spread"] -= 20.0
+    permissive = filter_trades(frame, FilterConfig(method="multiscale", multiscale_votes=1))
+    strict = filter_trades(frame, FilterConfig(method="multiscale", multiscale_votes=3))
+    assert strict.loc[80, "jf_is_outlier"]
+    assert not (strict["jf_is_outlier"] & ~permissive["jf_is_outlier"]).any()
+
+
+# TEST LOGIC: New controls fail clearly on meaningless or numerically unsafe settings.
+@pytest.mark.parametrize("kwargs", [
+    {"iqr_multiplier": 0}, {"iqr_multiplier": np.nan}, {"trend_penalty": 0},
+    {"trend_penalty": np.inf}, {"huber_delta": -1}, {"max_iter": 0},
+    {"max_iter": True}, {"tolerance": 0}, {"tolerance": np.nan},
+    {"multiscale_votes": 0}, {"multiscale_votes": 4}, {"multiscale_votes": True},
+])
+def test_invalid_new_configuration_controls_raise(kwargs):
+    with pytest.raises(ValueError):
+        FilterConfig(**kwargs)
+
+
+# TEST LOGIC: One ADMM iteration cannot masquerade as a fitted converged historical model.
+def test_robust_trend_nonconvergence_abstains_instead_of_flagging():
+    values = 100 + 0.4 * np.sin(np.arange(90) / 4)
+    frame = trades(values)
+    frame.loc[30, "spread"] += 25.0
+    frame.loc[60:, "spread"] += 12.0
+    result = filter_trades(frame, FilterConfig(method="robust_trend", max_iter=1, tolerance=1e-12))
+    failure = result["jf_status"].eq("solver_not_converged")
+    assert failure.any()
+    assert result.loc[failure, "jf_solver_converged"].eq(False).all()
+    assert result.loc[failure, "jf_solver_iterations"].eq(1).all()
+    assert result.loc[failure, "jf_baseline"].isna().all()
+    assert not result.loc[failure, "jf_is_outlier"].any()
+    assert result.loc[failure, "jf_weight"].eq(0).all()
+    assert not result.loc[failure, "jf_fit_eligible"].any()
+
+
+# TEST LOGIC: Normal solver settings must return usable, fully audited trend decisions.
+def test_robust_trend_default_convergence_produces_eligible_clean_rows():
+    frame = trades(np.r_[np.full(45, 100.0), np.full(45, 115.0)])
+    frame.loc[20, "spread"] = 130.0
+    result = filter_trades(frame, FilterConfig(method="robust_trend"))
+    assert not result["jf_status"].eq("solver_not_converged").any()
+    assert result["jf_solver_converged"].dropna().eq(True).all()
+    assert result.loc[20, "jf_is_outlier"]
+    assert result["jf_fit_eligible"].sum() >= 80
+
+
+# TEST LOGIC: Hard fitting candidates contain only accepted rows and preserve the caller's frame.
+@pytest.mark.parametrize("method", METHODS)
+def test_hard_fit_selection_is_explicit_and_preserves_input(method):
+    frame = trades(np.full(70, 100.0))
+    frame.loc[30, "spread"] = 130.0
+    result = filter_trades(frame, FilterConfig(method=method))
+    snapshot = result.copy(deep=True)
+    selected = select_fit_data(result)
+    pd.testing.assert_frame_equal(result, snapshot)
+    assert selected["jf_fit_eligible"].all()
+    assert selected["jf_status"].eq("ok").all()
+    assert not selected["jf_is_outlier"].any()
+    assert selected["jf_fit_weight"].eq(1).all()
+    assert 30 not in selected.index
+
+
+# TEST LOGIC: Soft fitting permits bounded influence only for supported decisions.
+def test_soft_fit_selection_excludes_abstention_and_causal_provisional_by_default():
+    result = pd.DataFrame({
+        "jf_status": ["ok", "outlier", "provisional_jump", "invalid_input", "solver_not_converged"],
+        "jf_is_outlier": [False, True, True, False, False],
+        "jf_weight": [1.0, 0.15, 0.2, 0.0, 0.0],
+        "jf_fit_eligible": [True, False, False, False, False],
+    })
+    selected = select_fit_data(result, policy="soft")
+    assert selected.index.tolist() == [0, 1]
+    assert selected["jf_fit_weight"].tolist() == [1.0, 0.15]
+    explicit = select_fit_data(result, policy="soft", include_provisional=True)
+    assert explicit.index.tolist() == [0, 1, 2]
+
+
+# TEST LOGIC: Bad fitting policies and non-annotated data fail before selecting rows.
+@pytest.mark.parametrize("kwargs", [{"policy": "unknown"}, {"policy": "soft"}])
+def test_fit_selection_requires_valid_policy_and_engine_annotations(kwargs):
+    with pytest.raises(ValueError):
+        select_fit_data(trades([100, 101]), **kwargs)
+
+
+# TEST LOGIC: Reject calendar strings that only fail later when a session clock is constructed.
+@pytest.mark.parametrize("holiday", ["2026-01-01T08:00", "NaT", "20260101", 20260101])
+def test_holiday_controls_require_complete_local_dates(holiday):
+    with pytest.raises(ValueError):
+        FilterConfig(holidays=(holiday,))
+
+
+# TEST LOGIC: Test session timestamps are explicitly localized before being converted to UTC.
+def session_trades(first_date="2025-01-03", next_date="2025-01-06"):
+    before = pd.date_range(f"{first_date} 17:00", periods=8, freq="10min", tz="America/New_York")
+    after = pd.date_range(f"{next_date} 08:00", periods=8, freq="10min", tz="America/New_York")
+    frame = trades(np.full(16, 100.0))
+    frame["time"] = before.append(after).tz_convert("UTC")
+    frame.loc[8, "spread"] = 125.0
+    return frame
+
+
+# TEST LOGIC: Closed nights/weekends add no artificial trading-clock age or reset.
+def test_trading_clock_preserves_support_over_weekend_but_wall_clock_resets():
+    frame = session_trades()
+    controls = {"method": "causal_ewma", "max_gap": "90min", "horizon": "1D"}
+    trading = filter_trades(frame, FilterConfig(time_basis="trading", **controls))
+    wall = filter_trades(frame, FilterConfig(time_basis="wall", **controls))
+    assert trading.loc[8, "jf_gap_minutes"] == pytest.approx(20.0)
+    assert trading.loc[8, "jf_wall_gap_minutes"] == pytest.approx(3710.0)
+    assert trading.loc[8, "jf_session_boundary"]
+    assert not trading.loc[1, "jf_session_boundary"]
+    assert wall.loc[8, "jf_gap_minutes"] == pytest.approx(3710.0)
+    assert trading.loc[8, "jf_n_reference"] == 8
+    assert trading.loc[8, "jf_is_outlier"]
+    assert wall.loc[8, "jf_n_reference"] == 0
+    assert wall.loc[8, "jf_status"] == "insufficient_history"
+    assert not wall.loc[8, "jf_is_outlier"]
+    assert trading.loc[8, "jf_reference_span_minutes"] == pytest.approx(70.0)
+    assert trading.loc[8, "jf_reference_density_per_hour"] == pytest.approx(8 / (70 / 60))
+
+
+# TEST LOGIC: A closure is removed only when the caller explicitly supplies its date.
+def test_supplied_holiday_is_compressed_and_no_holiday_calendar_is_guessed():
+    frame = session_trades(next_date="2025-01-07")
+    controls = {"method": "causal_ewma", "time_basis": "trading", "max_gap": "90min"}
+    supplied = filter_trades(frame, FilterConfig(holidays=("2025-01-06",), **controls))
+    unsupplied = filter_trades(frame, FilterConfig(**controls))
+    assert supplied.loc[8, "jf_gap_minutes"] == pytest.approx(20.0)
+    assert unsupplied.loc[8, "jf_gap_minutes"] == pytest.approx(650.0)
+    assert supplied.loc[8, "jf_is_outlier"]
+    assert unsupplied.loc[8, "jf_n_reference"] == 0
+
+
+# TEST LOGIC: Genuine inactivity while the bond market is open remains a support-breaking gap.
+def test_trading_clock_does_not_compress_an_illiquid_intraday_gap():
+    before = pd.date_range("2025-01-06 13:00", periods=8, freq="10min", tz="America/New_York")
+    after = pd.date_range("2025-01-06 15:30", periods=3, freq="10min", tz="America/New_York")
+    frame = trades(np.r_[np.full(8, 100.0), np.full(3, 125.0)])
+    frame["time"] = before.append(after).tz_convert("UTC")
+    result = filter_trades(frame, FilterConfig(method="causal_ewma", time_basis="trading", max_gap="45min"))
+    assert result.loc[8, "jf_gap_minutes"] == pytest.approx(80.0)
+    assert result.loc[8, "jf_n_reference"] == 0
+    assert not result.iloc[8:]["jf_is_outlier"].any()
+    assert not result.iloc[8:]["jf_fit_eligible"].any()
+
+
+# TEST LOGIC: Mixing bond cohorts must not change a bond's compressed time or density audit.
+def test_calendar_density_diagnostics_are_cusip_isolated():
+    first = session_trades()
+    second = trades(np.full(40, 1000.0), cusip="B", frequency="min")
+    second["time"] = pd.date_range("2025-01-06 09:00", periods=40, freq="min", tz="America/New_York").tz_convert("UTC")
+    config = FilterConfig(method="hampel", time_basis="trading")
+    direct = filter_trades(first, config)
+    combined = filter_trades(pd.concat([second, first]), config)
+    selected = combined.loc[combined["CUSIP"].eq("A")]
+    columns = ["jf_clock_time", "jf_gap_minutes", "jf_reference_span_minutes", "jf_reference_density_per_hour"]
+    pd.testing.assert_frame_equal(direct[columns].reset_index(drop=True), selected[columns].reset_index(drop=True))
+
+
+# TEST LOGIC: A downward market turn is not enough evidence to delete genuine clean trade levels.
+@pytest.mark.parametrize("drop", [0.0, 20.0])
+def test_piecewise_rule_abstains_at_uncertain_turns_without_labeling_market_move_bad(drop):
+    index = np.arange(120)
+    fair = 100 + 0.75 * np.minimum(index, 60) - 0.5 * np.maximum(index - 60, 0)
+    fair[60:] -= drop
+    frame = trades(fair)
+    frame.loc[25, "spread"] += 15.0
+    frame.loc[95, "spread"] -= 15.0
+    result = filter_trades(frame, FilterConfig(method="local_piecewise"))
+    assert result.loc[[25, 95], "jf_is_outlier"].all()
+    assert not result.loc[52:68, "jf_is_outlier"].any()
+    if drop:
+        ambiguous = result.loc[52:68, "jf_status"].eq("ambiguous_transition")
+        assert ambiguous.any()
+        assert not result.loc[52:68].loc[ambiguous, "jf_fit_eligible"].any()
+        assert result.loc[52:68].loc[ambiguous, "jf_weight"].eq(0).all()
+
+
+# TEST LOGIC: Explicit sessions can encode early closes without an inferred exchange calendar.
+def test_supplied_session_schedule_compresses_a_declared_early_close():
+    frame = session_trades()
+    frame.loc[:7, "time"] -= pd.Timedelta("6h")
+    schedule = pd.DataFrame({
+        "open": pd.to_datetime(["2025-01-03 08:00", "2025-01-06 08:00"]).tz_localize("America/New_York").tz_convert("UTC"),
+        "close": pd.to_datetime(["2025-01-03 13:00", "2025-01-06 18:30"]).tz_localize("America/New_York").tz_convert("UTC"),
+    })
+    config = FilterConfig(method="causal_ewma", time_basis="trading", max_gap="90min")
+    supplied = filter_trades(frame, config, session_schedule=schedule)
+    standard = filter_trades(frame, config)
+    assert supplied.loc[8, "jf_gap_minutes"] == pytest.approx(50.0)
+    assert supplied.loc[8, "jf_is_outlier"]
+    assert supplied.loc[8, "jf_n_reference"] == 8
+    assert standard.loc[8, "jf_gap_minutes"] == pytest.approx(380.0)
+    assert standard.loc[8, "jf_n_reference"] == 0
+
+
+# TEST LOGIC: A supplied schedule's timezone is required rather than silently guessed.
+def test_naive_session_schedule_is_rejected():
+    schedule = pd.DataFrame({"open": [pd.Timestamp("2025-01-03 08:00")], "close": [pd.Timestamp("2025-01-03 18:30")]})
+    with pytest.raises(ValueError):
+        filter_trades(session_trades(), FilterConfig(time_basis="trading"), session_schedule=schedule)
+
+
+# TEST LOGIC: Weekend records have no reference age under a weekday-only open-session clock.
+def test_closed_session_print_is_auditable_and_not_fit_eligible():
+    frame = session_trades()
+    closed = frame.iloc[[0]].copy()
+    closed["time"] = pd.Timestamp("2025-01-04 10:00", tz="America/New_York").tz_convert("UTC")
+    closed["spread"] = 135.0
+    frame = pd.concat([frame, closed], ignore_index=True)
+    result = filter_trades(frame, FilterConfig(method="hampel", time_basis="trading"))
+    assert not result.iloc[-1]["jf_fit_eligible"]
+    assert not result.iloc[-1]["jf_is_outlier"]
+    assert result.iloc[-1]["jf_weight"] == 0
+    assert pd.isna(result.iloc[-1]["jf_clock_time"])
+
+
+# TEST LOGIC: The declared clock and session bounds require valid, meaningful controls.
+@pytest.mark.parametrize("kwargs", [
+    {"time_basis": "row"}, {"session_open": "18:30", "session_close": "08:00"},
+    {"session_open": "08:00-04:00"}, {"holidays": ("not-a-date",)},
+])
+def test_invalid_calendar_controls_raise(kwargs):
+    with pytest.raises(ValueError):
+        FilterConfig(**kwargs)
+
+
+# TEST LOGIC: A short trading-clock age after a closure does not turn genuine opening repricing bad.
+@pytest.mark.parametrize("method", [method for method in METHODS if method != "causal_ewma"])
+def test_offline_methods_retain_or_abstain_at_clean_new_session_level_change(method):
+    from benchmarks.compare import DEFAULT_SEEDS, make_case
+    frame = make_case("calendar_sessions", DEFAULT_SEEDS[0], n=240)
+    result = filter_trades(frame[["CUSIP", "time", "spread"]], FilterConfig(method=method, time_basis="trading"))
+    clean = ~frame.loc[40:59, "true_contamination"]
+    assert not result.loc[40:59].loc[clean, "jf_is_outlier"].any()
+    assert not result.loc[40, "jf_is_outlier"]
+    assert result.loc[40, "jf_session_boundary"]
+    assert result.loc[40, "jf_wall_gap_minutes"] > 60 * 60
+    assert result.loc[40, "jf_gap_minutes"] < 60

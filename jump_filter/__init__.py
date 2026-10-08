@@ -2,11 +2,11 @@
 
 # SETUP LOGIC: the lightweight API remains usable without dashboard extras.
 from .config import FilterConfig, METHODS
-from .engine import filter_trades, summarize
+from .engine import filter_trades, summarize, select_fit_data
 from .demo import make_demo
 
-__version__ = "0.1.0"
-__all__ = ["FilterConfig", "METHODS", "filter_trades", "summarize", "make_demo", "show_filter"]
+__version__ = "0.2.0"
+__all__ = ["FilterConfig", "METHODS", "filter_trades", "summarize", "select_fit_data", "make_demo", "show_filter"]
 
 
 def show_filter(frame, **kwargs):

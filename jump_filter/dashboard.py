@@ -3,25 +3,19 @@
 from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from html import escape
+from hashlib import sha256
 import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
-
-# CONFIGURATION LOGIC: These descriptions explain the algorithm rather than infer a trade's economic cause.
-METHOD_HELP = {
-    "hampel": "A centered leave-one-out median and MAD identifies unusual local spread levels.",
-    "local_linear": "A robust time trend separates isolated deviations from a smooth spread drift.",
-    "jump_reversion": "A large move followed by a prompt return suggests an isolated anomalous trade.",
-    "causal_ewma": "A past-only robust baseline supports chronological use; persistent moves update the regime.",
-    "consensus": "Reversal confirmation combines unusual local level or trend residual with a return to the earlier neighborhood.",
-}
+from .explanations import METHOD_HELP, METHOD_EXPLANATIONS, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, PARAMETER_HELP, math_display_blocks
 
 # UI LOGIC: CSS is scoped to this workbench and never changes another notebook's controls.
 STYLE = """
 .jf-workbench{background:#f2f6fa;color:#19364b;font:14px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:18px;border-radius:17px;border:1px solid #dce5ee;max-width:1500px;width:100%;box-sizing:border-box}
 .jf-workbench *{box-sizing:border-box}.jf-workbench .widget-vbox{gap:12px;min-width:0}.jf-workbench .jf-hero{padding:25px;background:linear-gradient(115deg,#15354c,#096977);color:white;border-radius:12px}.jf-workbench .jf-hero h2{color:white;margin:4px 0 9px;font-size:27px}.jf-workbench .jf-hero p{margin:0;color:#dfedf3}.jf-workbench .jf-eyebrow{color:#bde3e6;font-size:11px;letter-spacing:.15em;font-weight:700;text-transform:uppercase}
 .jf-workbench .jf-card{background:white;border:1px solid #dce5ee;border-radius:11px;padding:17px;min-width:0}.jf-workbench .jf-help{color:#526a7f;font-size:13px}.jf-workbench .jf-row{display:flex;flex-flow:row wrap;gap:13px;align-items:flex-end}.jf-workbench .jf-control{flex:1 1 230px;min-width:0;max-width:100%;height:auto}.jf-workbench .jf-control:not(.widget-checkbox){display:flex;flex-direction:column;align-items:stretch}.jf-workbench .jf-control .widget-label{width:100%!important;text-align:left;white-space:normal;overflow:visible;height:auto;font-size:12px;font-weight:650;color:#304b61;margin-bottom:4px}.jf-workbench input:not([type=checkbox]),.jf-workbench select{border:1px solid #bfd0de;border-radius:6px;color:#19364b;padding:5px;min-height:34px}.jf-workbench .widget-button{height:38px;border-radius:7px;font-weight:650;padding:8px 16px}.jf-workbench .widget-button.mod-primary{background:#087f8c;color:white;border-color:#087f8c}.jf-workbench .jf-status{padding:11px 14px;border:1px solid #cbdce6;border-left:4px solid #087f8c;background:#edf5f8;border-radius:7px}.jf-workbench .jf-pending{color:#855d17;background:#fff5df;padding:7px 11px;border-radius:7px}.jf-workbench .jf-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:11px}.jf-workbench .jf-kpi{background:#f5fafb;border:1px solid #dbe6ec;padding:13px;border-radius:8px}.jf-workbench .jf-kpi strong{display:block;font-size:24px;color:#086f7d}.jf-workbench .jf-kpi span{font-size:12px;color:#526a7f}.jf-workbench .jf-table{overflow:auto;max-height:430px;border:1px solid #dce5ee;border-radius:8px}.jf-workbench table{border-collapse:separate;border-spacing:0;width:100%;font-size:12px;font-variant-numeric:tabular-nums}.jf-workbench th,.jf-workbench td{white-space:nowrap;padding:8px 10px!important;border:0!important;border-bottom:1px solid #e7edf3!important;text-align:right}.jf-workbench thead th{position:sticky;top:0;background:#eaf1f6;z-index:1;color:#29465c}.jf-workbench tbody tr:nth-child(even){background:#f6f9fc}.jf-workbench td:first-child,.jf-workbench th:first-child{text-align:left}.jf-workbench .widget-tab-contents{padding:13px;border:1px solid #dce5ee;background:white}.jf-workbench .jf-param{flex:1 1 270px;min-width:0;border:1px solid #e0e8ef;border-radius:8px;padding:10px}.jf-workbench .jf-param-title{font-size:12px;font-weight:650;color:#304b61}.jf-workbench .jf-param .widget-hslider{width:100%;min-width:0}.jf-workbench .jf-param .widget-text{width:100%}.jf-workbench .widget-html-content{max-width:100%}
+.jf-workbench .output_subarea,.jf-workbench .jp-RenderedMath,.jf-workbench mjx-container[display="true"]{max-width:100%;overflow-x:auto}.jf-workbench .MathJax_Display{max-width:100%;overflow-x:auto;text-align:left!important}
 """
 
 
@@ -43,20 +37,45 @@ def evaluation_summary(annotated):
                 regime_changes=int(annotated["jf_regime_change"].sum()))
 
 
-def method_comparison(data, config, *, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC"):
+def fitting_statistics(annotated, *, cusip_col="CUSIP"):
+    """Report hard/soft fitting coverage without treating abstentions as clean."""
+    # Input: CUSIP=['A','A','A','A'],jf_row_id=[0,1,2,3],jf_status=['ok','outlier','insufficient_history','provisional_jump'],jf_is_outlier=[False,True,False,True],jf_weight=[1,.2,0,.1].
+    # Output: grouped table indexed by A has supplied=4,evaluated=3,hard_fit_rows=1,soft_fit_rows=2,soft_weight_sum=1.2,solver_failures=0,ambiguous_transitions=0.
+    # Trick: Provisional is evaluated for review but excluded from default fits; a weight sum is not an effective sample size or inverse variance.
+    # CORE LOGIC: STEP 1 — Separate assessed, retained, and softly weighted observations.
+    status = annotated["jf_status"]
+    hard = status.eq("ok") & ~annotated["jf_is_outlier"]
+    soft = status.isin(["ok", "outlier"]) & annotated["jf_weight"].gt(0)
+    frame = annotated.assign(_evaluated=status.isin(["ok", "outlier", "provisional_jump"]),
+                             _hard=hard, _soft=soft,
+                             _weight=annotated["jf_weight"].where(soft, 0.0),
+                             _solver=status.eq("solver_not_converged"), _ambiguous=status.eq("ambiguous_transition"))
+    table = frame.groupby(cusip_col, dropna=False, sort=False).agg(
+        supplied=("jf_row_id", "size"), evaluated=("_evaluated", "sum"), hard_fit_rows=("_hard", "sum"),
+        soft_fit_rows=("_soft", "sum"), soft_weight_sum=("_weight", "sum"), solver_failures=("_solver", "sum"), ambiguous_transitions=("_ambiguous", "sum"))
+    # Input: table index=['A'],supplied=[4],evaluated=[3],hard_fit_rows=[1],soft_fit_rows=[2],soft_weight_sum=[1.2],solver_failures=[0],ambiguous_transitions=[0].
+    # Output: one row CUSIP='A' retains the seven input statistics, adds coverage=.75,hard_retention=.25.
+    # Trick: Denominators include every supplied row, including invalid and unsupported records.
+    # CORE LOGIC: STEP 2 — Expose both evaluation and downstream retention coverage.
+    table["coverage"] = table["evaluated"] / table["supplied"]
+    table["hard_retention"] = table["hard_fit_rows"] / table["supplied"]
+    return table.reset_index()
+
+
+def method_comparison(data, config, *, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", session_schedule=None):
     """Evaluate all methods on an explicitly selected input population."""
     # SETUP LOGIC: Public engine imports avoid a dashboard/engine initialization cycle.
     from . import METHODS, filter_trades
     records = []
     # Input: data={CUSIP:['A'],time:['2026-10-01T10:00Z'],spread:[100]}, config=FilterConfig().
-    # Output: methods=['hampel','local_linear','jump_reversion','causal_ewma','consensus'];
+    # Output: each supported method (e.g. hampel) produces
     # each row has total=1,evaluated=0,outliers=0,flag_rate=NaN,invalid=0,
     # unsupported=1,provisional=0,regime_changes=0.
     # Trick: Every method sees the same rows and hyperparameters; no result is chosen by its flag rate.
     # CORE LOGIC: STEP 1 — Recompute each algorithm on the same review population.
     for method in METHODS:
         result = filter_trades(data, replace(config, method=method), cusip_col=cusip_col,
-                               time_col=time_col, spread_col=spread_col, timezone=timezone)
+                               time_col=time_col, spread_col=spread_col, timezone=timezone, session_schedule=session_schedule)
         records.append(dict(method=method, **evaluation_summary(result)))
     return pd.DataFrame(records)
 
@@ -102,15 +121,17 @@ def _kpi_html(stats):
 class FilterDashboard:
     """Notebook controls with an explicit, atomically published applied result."""
 
-    def __init__(self, data, *, config=None, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", unit="bp"):
+    def __init__(self, data, *, config=None, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", unit="bp", session_schedule=None):
         # SETUP LOGIC: Copy caller data; keep optional notebook dependencies outside package imports.
         import ipywidgets as w
         from . import FilterConfig, METHODS
         from .plots import METHOD_LABELS
         self.w, self.data = w, data.copy()
-        self.config = config or FilterConfig()
+        self.config = config or FilterConfig(time_basis="trading")
         self.mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, timezone=timezone)
         self.unit, self.result, self.applied_config = unit, None, None
+        self.session_schedule = session_schedule.copy(deep=True) if session_schedule is not None else None
+        self.applied_schedule = None
         self.comparison, self._applied_state, self.busy = None, None, False
         # VALIDATION LOGIC: Fail early for a bad mapping, before showing controls that cannot run.
         if not all(column in data for column in [cusip_col, time_col, spread_col]):
@@ -121,18 +142,24 @@ class FilterDashboard:
         self.method = w.Dropdown(description="Detection method", options=[(METHOD_LABELS[name], name) for name in METHODS], value=self.config.method)
         self.help = w.HTML()
         self.pending, self.status, self.kpis = w.HTML(), w.HTML(), w.HTML()
-        self.chart, self.statistics, self.method_output = w.Output(), w.Output(), w.Output()
+        self.chart, self.statistics, self.method_output, self.explanation = w.Output(), w.Output(), w.Output(), w.Output()
         self.apply_button = w.Button(description="Apply filter", button_style="primary", icon="check")
         self.compare_button = w.Button(description="Compare methods for this bond", icon="bar-chart")
         self.export_button = w.Button(description="Export applied review", icon="download", disabled=True)
         self.export_path = w.Text(value="reports/jump_filter", description="Export folder")
-        self.params, param_cards = {}, []
+        self.params, self._param_sliders, self._param_cards, param_cards = {}, {}, {}, []
         # UI LOGIC: Every numerical slider has a synchronized input box for exact values.
         specs = [("window", "Maximum reference timestamps", 3, 201, 2, "int"),
                  ("min_neighbors", "Minimum reference timestamps", 2, 60, 1, "int"),
                  ("threshold", "Robust score threshold", .5, 12., .1, "float"),
                  ("abs_floor", f"Minimum deviation · {unit}", .001, 50., .1, "float"),
                  ("reversion_tolerance", "Return tolerance · robust scale", .1, 6., .1, "float"),
+                 ("iqr_multiplier", "Tukey IQR multiplier", .1, 10., .1, "float"),
+                 ("multiscale_votes", "Required multiscale votes", 1, 3, 1, "int"),
+                 ("trend_penalty", "TV level-change penalty λ", .1, 100., .1, "float"),
+                 ("huber_delta", "Huber clipping δ", .1, 10., .1, "float"),
+                 ("max_iter", "Solver iteration limit", 20, 5000, 20, "int"),
+                 ("tolerance", "Solver convergence tolerance", .000001, .01, .000001, "float"),
                  ("alpha", "EWMA learning rate", .01, 1., .01, "float"),
                  ("persistence", "Persistence confirmation cohorts", 2, 10, 1, "int")]
         for name, label, lower, upper, step, kind in specs:
@@ -142,11 +169,21 @@ class FilterDashboard:
             number = input_cls(value=value, min=min(lower, value), max=max(upper, value), step=step)
             w.link((slider, "value"), (number, "value"))
             self.params[name] = number
-            param_cards.append(w.VBox([w.HTML(f'<div class="jf-param-title">{escape(label)}</div>'), slider, number]).add_class("jf-param"))
+            self._param_sliders[name] = slider
+            card = w.VBox([w.HTML(f'<div class="jf-param-title">{escape(label)}</div>'), slider, number,
+                           w.HTML(f'<p class="jf-help">{escape(PARAMETER_HELP[name])}</p>')]).add_class("jf-param")
+            self._param_cards[name] = card
+            param_cards.append(card)
         self.horizon = w.Text(value=str(self.config.horizon), description="Reference horizon (e.g. 3D)")
         self.max_gap = w.Text(value=str(self.config.max_gap), description="Session break gap (e.g. 1D)")
-        self._controls = [self.method, self.horizon, self.max_gap, *self.params.values()]
-        for control in [self.cusip, self.method, self.horizon, self.max_gap, self.export_path]:
+        self.time_basis = w.Dropdown(options=[("Trading time / 开市累计时间", "trading"), ("Wall clock / 日历时间", "wall")], value=self.config.time_basis, description="Distance clock")
+        self.session_timezone = w.Text(value=self.config.session_timezone, description="Market session timezone")
+        self.session_open = w.Text(value=self.config.session_open, description="Weekday session opens")
+        self.session_close = w.Text(value=self.config.session_close, description="Weekday session closes")
+        self.holidays = w.Text(value=", ".join(self.config.holidays), description="Closed dates · YYYY-MM-DD, ...")
+        self._calendar_controls = [self.time_basis, self.session_timezone, self.session_open, self.session_close, self.holidays]
+        self._controls = [self.method, self.horizon, self.max_gap, *self._calendar_controls, *self.params.values()]
+        for control in [self.cusip, self.method, self.horizon, self.max_gap, self.export_path, *self._calendar_controls]:
             control.add_class("jf-control")
             control.style.description_width = "initial"
         # UI LOGIC: CUSIP selection changes the view only; parameter edits await explicit Apply.
@@ -157,13 +194,17 @@ class FilterDashboard:
         self.apply_button.on_click(self.run)
         self.compare_button.on_click(self.compare)
         self.export_button.on_click(self.export)
-        self.tabs = w.Tab(children=[self.chart, self.statistics, self.method_output])
-        for i, name in enumerate(["Trade review", "Statistical dashboard", "Method comparison"]):
+        self.tabs = w.Tab(children=[self.chart, self.statistics, self.method_output, self.explanation])
+        for i, name in enumerate(["Trade review", "Statistical dashboard", "Method comparison", "Method & mathematics"]):
             self.tabs.set_title(i, name)
         hero = w.HTML('<div class="jf-hero"><div class="jf-eyebrow">Bond trade quality</div><h2>Jump Filter</h2><p>Review unusual trade spreads with robust local evidence. Preserve genuine spread moves and inspect the reason for every flag.</p></div>')
-        note = w.HTML('<p class="jf-help">CUSIP, time and spread identify statistical anomalies. They cannot establish retail origin, distress, markup or commission. Centered methods use future trades; Causal robust EWMA uses past trades only. Baselines are diagnostic estimates.</p>')
-        settings = w.Accordion(children=[w.VBox([w.Box(param_cards, layout=w.Layout(display="flex", flex_flow="row wrap", gap="12px")), self._row(self.horizon, self.max_gap)])], selected_index=None)
+        note = w.HTML('<p class="jf-help">用于历史拟合时，前后交易都可以提供证据；默认展示离线方法，Causal EWMA 是在线比较基准。CUSIP、time、spread 只能标记统计异常，不能确定 retail、distress 或 commission 的原因。Method & mathematics 可在 Apply 前查看所选方法的公式、例子和参数作用。</p>')
+        calendar = w.VBox([self._row(self.time_basis, self.session_timezone), self._row(self.session_open, self.session_close), self.holidays,
+                           w.HTML('<p class="jf-help">Trading time 压缩 scheduled 夜间、周末与列出的 holidays；开市期间没有成交的 gap 仍保留。Session calendar 是研究假设，需要按市场校准；horizon 与 max_gap 在 trading 模式下表示开市累计时间。图始终显示真实 UTC 时间。API 支持精确 session_schedule。</p>')])
+        parameter_grid = w.Box(param_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
+        settings = w.Accordion(children=[w.VBox([parameter_grid, self._row(self.horizon, self.max_gap)]), calendar], selected_index=None)
         settings.set_title(0, "Hyperparameters · sliders and exact inputs")
+        settings.set_title(1, "Trading calendar · nights, weekends and liquidity gaps")
         self.widget = w.VBox([w.HTML("<style>" + STYLE + "</style>"), hero,
                               self._row(self.cusip, self.method), self.help, settings, note,
                               self._row(self.apply_button, self.compare_button), self.pending, self.status, self.kpis, self.tabs,
@@ -173,27 +214,66 @@ class FilterDashboard:
 
     def _row(self, *children):
         # UI LOGIC: Wrapping respects notebook pane width rather than browser viewport width.
-        return self.w.Box(list(children), layout=self.w.Layout(display="flex", flex_flow="row wrap", width="100%", gap="13px")).add_class("jf-row")
+        return self.w.Box(list(children), layout=self.w.Layout(display="flex", flex_flow="row wrap", width="100%")).add_class("jf-row")
 
     def _state(self):
         # UI LOGIC: Only algorithm settings determine pending state; view focus and export path do not.
-        return tuple(control.value for control in self._controls)
+        fingerprint = sha256(self.session_schedule.to_csv(index=False).encode("utf-8")).hexdigest() if self.session_schedule is not None else None
+        return tuple(control.value for control in self._controls) + (fingerprint,)
 
     def _configuration(self):
         # CONFIGURATION LOGIC: Validation belongs to FilterConfig and the engine rather than the widgets.
         from . import FilterConfig
         return FilterConfig(method=self.method.value, horizon=self.horizon.value, max_gap=self.max_gap.value,
+                            time_basis=self.time_basis.value, session_timezone=self.session_timezone.value,
+                            session_open=self.session_open.value, session_close=self.session_close.value,
+                            holidays=tuple(value.strip() for value in self.holidays.value.split(",") if value.strip()),
                             **{name: control.value for name, control in self.params.items()})
 
     def _help_changed(self, _=None):
-        # UI LOGIC: Literal method keys have curated explanatory text.
+        # UI LOGIC: Show and enable only parameters used by the currently selected method.
         self.help.value = '<p class="jf-help">' + escape(METHOD_HELP[self.method.value]) + '</p>'
+        for control in [self.session_timezone, self.session_open, self.session_close, self.holidays]:
+            control.disabled = self.busy or self.session_schedule is not None or self.time_basis.value == "wall"
+        relevant = METHOD_EXPLANATIONS[self.method.value]["parameters"]
+        for name, control in self.params.items():
+            control.disabled = self.busy or name not in relevant
+            self._param_sliders[name].disabled = self.busy or name not in relevant
+            self._param_cards[name].layout.display = "" if name in relevant else "none"
+
+    def _render_explanation(self):
+        # UI LOGIC: Math display objects render equations natively; explanations always follow pending selection.
+        from IPython.display import HTML, Math, display
+        card = METHOD_EXPLANATIONS[self.method.value]
+        applied = self.applied_config.method if self.applied_config else "none yet"
+        with self.explanation:
+            self.explanation.clear_output(wait=True)
+            display(HTML(f'<h3>{escape(card["name"])}</h3><p class="jf-help">{escape(card["mode"])} · Explanation: selected method {escape(self.method.value)} · Applied plots/exports: {escape(applied)}</p><p>{escape(card["summary"])}</p>'))
+            steps = COMMON_STEPS + CLOCK_STEPS + card["steps"] + FITTING_STEPS
+            for title, prose, formula in steps:
+                display(HTML(f'<h4>{escape(title)}</h4><p>{escape(prose)}</p>'))
+                for block in math_display_blocks(formula):
+                    display(Math(block))
+            display(HTML(f'<h4>Numeric example / 数值例子</h4><p>{escape(card["example"])}</p><h4>Assumptions and limits / 假设与局限</h4><p>{escape(card["tradeoffs"])}</p>'))
+            rows = [(name, self.params[name].value, PARAMETER_HELP[name]) for name in card["parameters"]]
+            rows += [("time_basis", self.time_basis.value, "Trading exposure or wall-clock distance"),
+                     ("session_timezone", self.session_timezone.value, "Market calendar timezone"),
+                     ("session_open", self.session_open.value, "Weekday regular open"),
+                     ("session_close", self.session_close.value, "Weekday regular close"),
+                     ("holidays", self.holidays.value, "Explicit full-day closures")]
+            display(HTML('<h4>Selected parameters / 当前待应用参数</h4>' + _table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"])) ))
+            title, url = card["reference"]
+            display(HTML(f'<p class="jf-help">Reference: <a href="{escape(url, quote=True)}" target="_blank">{escape(title)}</a></p>'))
+            if self.session_schedule is not None:
+                display(HTML('<p class="jf-help">An authoritative session_schedule was supplied; trading mode uses only its intervals and overrides weekday calendar controls.</p>' + _table_html(self.session_schedule)))
 
     def _pending_changed(self, _=None):
         # UI LOGIC: Reverting edits restores the applied badge without running algorithms.
         label = "Choose settings and Apply." if self.result is None else (
             "Pending settings · Apply to update plots and exports." if self._state() != self._applied_state else "Applied · plots and exports match these settings.")
         self.pending.value = '<div class="jf-pending">' + label + '</div>'
+        self._help_changed()
+        self._render_explanation()
 
     def _lock(self, busy):
         # UI LOGIC: Keep state fixed during computation and allow export only after a successful Apply.
@@ -201,6 +281,7 @@ class FilterDashboard:
         for control in [*self._controls, self.cusip, self.apply_button, self.compare_button]:
             control.disabled = busy
         self.export_button.disabled = busy or self.result is None
+        self._help_changed()
 
     def _selected(self, frame):
         # Input: CUSIP=['A','B','A'], jf_row_id=[0,1,2], selected='A'.
@@ -219,9 +300,9 @@ class FilterDashboard:
                               title=f'{self.cusip.value} · {METHOD_LABELS[self.applied_config.method] if self.applied_config else "Review"}')
         diagnostic = diagnostic_figure(selected, spread_col=self.mapping["spread_col"], unit=self.unit)
         summary = summarize(result, cusip_col=self.mapping["cusip_col"])
-        return selected, figure, diagnostic, summary
+        return selected, figure, diagnostic, summary, fitting_statistics(result, cusip_col=self.mapping["cusip_col"])
 
-    def _publish(self, selected, figure, diagnostic, summary):
+    def _publish(self, selected, figure, diagnostic, summary, fitting):
         # UI LOGIC: Replace output areas only after engine and plot construction both succeed.
         from IPython.display import HTML, display
         self.kpis.value = _kpi_html(evaluation_summary(selected))
@@ -232,10 +313,15 @@ class FilterDashboard:
         with self.statistics:
             self.statistics.clear_output(wait=True)
             display(HTML('<h4>All bonds · applied method</h4>' + _table_html(summary)))
+            display(HTML('<h4>All bonds · fitting coverage and retention</h4>' + _table_html(fitting)))
+            display(HTML('<p class="jf-help">Hard fit: jf_fit_eligible / status ok and unflagged. Soft fit: status ok or outlier with positive suggested influence weight. Provisional jumps, ambiguous transitions, invalid inputs, unsupported rows and solver failures are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size.</p>'))
             display(HTML(diagnostic.to_html(full_html=False, include_plotlyjs="inline")))
             audits = audit_tables(selected)
             display(HTML('<h4>Selected bond · observed daily support</h4>' + _table_html(audits["daily"])))
             display(HTML('<h4>Selected bond · flag and support reasons</h4>' + _table_html(audits["reasons"])))
+            support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
+                               "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
+            display(HTML('<h4>Selected bond · liquidity and local uncertainty diagnostics</h4>' + _table_html(selected[[name for name in support_columns if name in selected]])))
             display(HTML('<h4>Selected bond · trade audit</h4>' + _table_html(selected)))
 
     def run(self, _=None):
@@ -249,11 +335,13 @@ class FilterDashboard:
         previous = self.applied_config
         try:
             config = self._configuration()
-            result = filter_trades(self.data, config, **self.mapping)
+            schedule = self.session_schedule.copy(deep=True) if self.session_schedule is not None else None
+            result = filter_trades(self.data, config, **self.mapping, session_schedule=schedule)
             self.applied_config = config
             rendered = self._render(result)
             self._publish(*rendered)
             self.result, self._applied_state, self.comparison = result, self._state(), None
+            self.applied_schedule = schedule
             self.method_output.clear_output()
             self.status.value = f'<div class="jf-status">Applied {escape(config.method)} to {len(result):,} supplied rows. Charts focus on {escape(str(self.cusip.value))}.</div>'
         except Exception as exc:
@@ -281,7 +369,7 @@ class FilterDashboard:
             return
         self._lock(True)
         try:
-            table = method_comparison(self._selected(self.data), self.applied_config, **self.mapping)
+            table = method_comparison(self._selected(self.data), self.applied_config, **self.mapping, session_schedule=self.applied_schedule)
             figure = comparison_figure(table)
             with self.method_output:
                 self.method_output.clear_output(wait=True)
@@ -307,10 +395,14 @@ class FilterDashboard:
             output.mkdir(parents=True, exist_ok=False)
             self.result.to_csv(output / "annotated_trades.csv", index=False)
             summarize(self.result, cusip_col=self.mapping["cusip_col"]).to_csv(output / "bond_summary.csv", index=False)
+            fitting_statistics(self.result, cusip_col=self.mapping["cusip_col"]).to_csv(output / "fitting_coverage.csv", index=False)
             for name, table in audit_tables(self._selected(self.result)).items():
                 table.to_csv(output / f"selected_bond_{name}.csv", index=False)
             settings = dict(config=asdict(self.applied_config), mapping=self.mapping, unit=self.unit,
-                            selected_cusip=str(self.cusip.value), rows=len(self.result), source="applied result")
+                            selected_cusip=str(self.cusip.value), rows=len(self.result), source="applied result",
+                            calendar=self.result.attrs.get("jump_filter", {}).get("calendar"))
+            if self.applied_schedule is not None:
+                self.applied_schedule.to_csv(output / "session_schedule.csv", index=False)
             (output / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
             figure = trade_figure(self._selected(self.result), cusip_col=self.mapping["cusip_col"],
                                   spread_col=self.mapping["spread_col"], unit=self.unit, title=str(self.cusip.value),
