@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import numpy as np
 import pandas as pd
-from .explanations import METHOD_HELP, METHOD_EXPLANATIONS, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, PARAMETER_HELP, math_display_blocks
+from .explanations import METHOD_HELP, METHOD_EXPLANATIONS, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, POLICY_STEPS, PARAMETER_HELP, math_display_blocks
 
 # UI LOGIC: CSS is scoped to this workbench and never changes another notebook's controls.
 # Trick: Native widget inputs use a horizontal 148px flex basis; column labels require an explicit 38px vertical basis.
@@ -81,46 +81,64 @@ def evaluation_summary(annotated):
     """Return explicit review counts for one applied population."""
     # Input: jf_status=['ok','outlier','invalid_input','insufficient_history','provisional_jump']; flags=[False,True,False,False,True],regime=[False,False,False,False,False].
     # Output: total=5,evaluated=3,outliers=2,flag_rate=2/3,invalid=1,unsupported=1,provisional=1,regime_changes=0.
-    # Trick: Provisional jumps are evaluable review cases; invalid/unsupported rows never count as accepted evidence.
+    # Trick: Algorithm statuses preserve this denominator when an optional policy retains or excludes an unsupported trade.
     # CORE LOGIC: STEP 1 — Build separate evaluation and review denominators.
-    status = annotated["jf_status"]
+    status = annotated.get("jf_algorithm_status", annotated["jf_status"])
     evaluated = status.isin(["ok", "outlier", "provisional_jump"])
     count = int(evaluated.sum())
     outliers = int(annotated["jf_is_outlier"].sum())
-    return dict(total=len(annotated), evaluated=count, outliers=outliers,
-                flag_rate=outliers / count if count else np.nan,
+    stats = dict(total=len(annotated), evaluated=count, outliers=outliers,
+                flag_rate=int((annotated["jf_is_outlier"] & evaluated).sum()) / count if count else np.nan,
                 invalid=int(status.eq("invalid_input").sum()),
                 unsupported=int(status.eq("insufficient_history").sum()),
                 provisional=int(status.eq("provisional_jump").sum()),
                 regime_changes=int(annotated["jf_regime_change"].sum()))
+    # Input: Step 1's five records plus fit_eligible=[True,False,False,False,False]; algorithm flags equal final flags and all optional masks are absent.
+    # Output: total=5,evaluated=3,outliers=2,flag_rate=2/3,invalid=1,unsupported=1,provisional=1,regime_changes=0,fit_eligible=1,algorithm_outliers=2,retained_uncertain=0,quantity_rejected=0,max_deviation_rejected=0.
+    # Trick: Optional masks default to false; an unassessed policy rejection stays outside the evaluated flag-rate denominator.
+    # CORE LOGIC: STEP 2 — Report final retention independently from algorithm assessment.
+    empty = pd.Series(False, index=annotated.index)
+    stats.update(fit_eligible=int(annotated.get("jf_fit_eligible", status.eq("ok") & ~annotated["jf_is_outlier"]).sum()),
+                 algorithm_outliers=int(annotated.get("jf_algorithm_is_outlier", annotated["jf_is_outlier"]).sum()),
+                 retained_uncertain=int(annotated.get("jf_policy_retained_uncertain", empty).sum()),
+                 quantity_rejected=int(annotated.get("jf_policy_quantity_rejected", empty).sum()),
+                 max_deviation_rejected=int(annotated.get("jf_policy_max_deviation", empty).sum()))
+    return stats
 
 
 def fitting_statistics(annotated, *, cusip_col="CUSIP"):
     """Report hard/soft fitting coverage without treating abstentions as clean."""
-    # Input: CUSIP=['A','A','A','A'],jf_row_id=[0,1,2,3],jf_status=['ok','outlier','insufficient_history','provisional_jump'],jf_is_outlier=[False,True,False,True],jf_weight=[1,.2,0,.1].
-    # Output: grouped table indexed by A has supplied=4,evaluated=3,hard_fit_rows=1,soft_fit_rows=2,soft_weight_sum=1.2,solver_failures=0,ambiguous_transitions=0.
-    # Trick: Provisional is evaluated for review but excluded from default fits; a weight sum is not an effective sample size or inverse variance.
+    # Input: algorithm status=['ok','outlier','insufficient_history'],final status=['ok','outlier','retained_uncertain'],fit_eligible=[True,False,True],weight=[1,.2,1].
+    # Output: frame gains _hard=[True,False,True],_soft=[True,True,True],_evaluated=[True,True,False],_weight=[1,.2,1],_solver=[False,False,False],_ambiguous=[False,False,False],_retained_uncertain=[False,False,True].
+    # Trick: Policy retention changes fit selection without presenting an unsupported trade as algorithm-assessed evidence.
     # CORE LOGIC: STEP 1 — Separate assessed, retained, and softly weighted observations.
     status = annotated["jf_status"]
-    hard = status.eq("ok") & ~annotated["jf_is_outlier"]
-    soft = status.isin(["ok", "outlier"]) & annotated["jf_weight"].gt(0)
-    frame = annotated.assign(_evaluated=status.isin(["ok", "outlier", "provisional_jump"]),
+    algorithm = annotated.get("jf_algorithm_status", status)
+    hard = annotated.get("jf_fit_eligible", status.eq("ok") & ~annotated["jf_is_outlier"])
+    soft = status.isin(["ok", "outlier", "retained_uncertain"]) & annotated["jf_weight"].gt(0)
+    frame = annotated.assign(_evaluated=algorithm.isin(["ok", "outlier", "provisional_jump"]),
                              _hard=hard, _soft=soft,
                              _weight=annotated["jf_weight"].where(soft, 0.0),
-                             _solver=status.eq("solver_not_converged"), _ambiguous=status.eq("ambiguous_transition"))
+                             _solver=algorithm.eq("solver_not_converged"), _ambiguous=algorithm.eq("ambiguous_transition"),
+                             _retained_uncertain=status.eq("retained_uncertain"))
+    # Input: CUSIP=['A','A','A'],evaluated=[True,True,False],hard=[True,False,True],soft=[True,True,True],weight=[1,.2,1].
+    # Output: A supplied=3,evaluated=2,hard_fit_rows=2,soft_fit_rows=3,soft_weight_sum=2.2,retained_uncertain=1,solver_failures=0,ambiguous_transitions=0.
+    # Trick: Influence-weight sums are neither effective sample sizes nor inverse variances.
+    # CORE LOGIC: STEP 2 — Aggregate the distinct algorithm and final fitting populations.
     table = frame.groupby(cusip_col, dropna=False, sort=False).agg(
         supplied=("jf_row_id", "size"), evaluated=("_evaluated", "sum"), hard_fit_rows=("_hard", "sum"),
-        soft_fit_rows=("_soft", "sum"), soft_weight_sum=("_weight", "sum"), solver_failures=("_solver", "sum"), ambiguous_transitions=("_ambiguous", "sum"))
+        soft_fit_rows=("_soft", "sum"), soft_weight_sum=("_weight", "sum"), solver_failures=("_solver", "sum"),
+        ambiguous_transitions=("_ambiguous", "sum"), retained_uncertain=("_retained_uncertain", "sum"))
     # Input: table index=['A'],supplied=[4],evaluated=[3],hard_fit_rows=[1],soft_fit_rows=[2],soft_weight_sum=[1.2],solver_failures=[0],ambiguous_transitions=[0].
-    # Output: one row CUSIP='A' retains the seven input statistics, adds coverage=.75,hard_retention=.25.
+    # Output: one row CUSIP='A' retains its statistics and adds coverage=.75,hard_retention=.25.
     # Trick: Denominators include every supplied row, including invalid and unsupported records.
-    # CORE LOGIC: STEP 2 — Expose both evaluation and downstream retention coverage.
+    # CORE LOGIC: STEP 3 — Expose both evaluation and downstream retention coverage.
     table["coverage"] = table["evaluated"] / table["supplied"]
     table["hard_retention"] = table["hard_fit_rows"] / table["supplied"]
     return table.reset_index()
 
 
-def method_comparison(data, config, *, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", session_schedule=None):
+def method_comparison(data, config, *, cusip_col="CUSIP", time_col="time", spread_col="spread", quantity_col=None, timezone="UTC", session_schedule=None):
     """Evaluate all methods on an explicitly selected input population."""
     # SETUP LOGIC: Public engine imports avoid a dashboard/engine initialization cycle.
     from . import METHODS, filter_trades
@@ -128,12 +146,13 @@ def method_comparison(data, config, *, cusip_col="CUSIP", time_col="time", sprea
     # Input: data={CUSIP:['A'],time:['2026-10-01T10:00Z'],spread:[100]}, config=FilterConfig().
     # Output: each supported method (e.g. hampel) produces
     # each row has total=1,evaluated=0,outliers=0,flag_rate=NaN,invalid=0,
-    # unsupported=1,provisional=0,regime_changes=0.
+    # unsupported=1,provisional=0,regime_changes=0,fit_eligible=0,algorithm_outliers=0,
+    # retained_uncertain=0,quantity_rejected=0,max_deviation_rejected=0.
     # Trick: Every method sees the same rows and hyperparameters; no result is chosen by its flag rate.
     # CORE LOGIC: STEP 1 — Recompute each algorithm on the same review population.
     for method in METHODS:
         result = filter_trades(data, replace(config, method=method), cusip_col=cusip_col,
-                               time_col=time_col, spread_col=spread_col, timezone=timezone, session_schedule=session_schedule)
+                               time_col=time_col, spread_col=spread_col, quantity_col=quantity_col, timezone=timezone, session_schedule=session_schedule)
         records.append(dict(method=method, **evaluation_summary(result)))
     return pd.DataFrame(records)
 
@@ -145,7 +164,7 @@ def audit_tables(annotated):
     # Trick: Only observed UTC dates are listed; untimed records remain in the reason table without fabricated calendar bins.
     # CORE LOGIC: STEP 1 — Aggregate actual calendar support and flags on observed days.
     frame = annotated.assign(_day=annotated["jf_time"].dt.floor("D"),
-                             _evaluated=annotated["jf_status"].isin(["ok", "outlier", "provisional_jump"]))
+                             _evaluated=annotated.get("jf_algorithm_status", annotated["jf_status"]).isin(["ok", "outlier", "provisional_jump"]))
     daily = frame.loc[frame["_day"].notna()].groupby("_day", sort=True).agg(
         trades=("jf_row_id", "size"), evaluated=("_evaluated", "sum"), flagged=("jf_is_outlier", "sum"),
     ).reset_index().rename(columns={"_day": "date_utc"})
@@ -157,7 +176,15 @@ def audit_tables(annotated):
         trades=("jf_row_id", "size"), flagged=("jf_is_outlier", "sum"),
     ).reset_index()
     # REPORTING LOGIC: Exact tables are reusable by both dashboard surfaces and exports.
-    return {"daily": daily, "reasons": reasons}
+    tables = {"daily": daily, "reasons": reasons}
+    # Input: policy reasons=['algorithm_decision','small_suspicious','retained_uncertain'],flags=[False,True,False],fit_eligible=[True,False,True].
+    # Output: reason rows in lexical order each have trades=1,flagged=[0,0,1],fit_eligible=[1,1,0].
+    # Trick: Keep exact engine reason strings so policy decisions remain separate from statistical evidence.
+    # CORE LOGIC: STEP 3 — Aggregate the optional policy decision audit.
+    if "jf_policy_reason" in annotated:
+        tables["policy_reasons"] = annotated.groupby("jf_policy_reason", dropna=False, sort=True).agg(
+            trades=("jf_row_id", "size"), flagged=("jf_is_outlier", "sum"), fit_eligible=("jf_fit_eligible", "sum")).reset_index()
+    return tables
 
 
 class ReviewWorkspace:
@@ -239,6 +266,11 @@ def _table_html(frame, *, limit=200):
               "jf_weight": "Influence weight", "jf_fit_eligible": "Fit eligible", "jf_row_id": "Source row",
               "jf_gap_minutes": "Active gap · min", "jf_wall_gap_minutes": "Wall gap · min", "jf_session_boundary": "Session boundary",
               "jf_scale": "Local scale", "jf_reference_density_per_hour": "References / hour", "jf_reference_span_minutes": "Reference span · min"}
+    labels.update(retained_uncertain="Retained uncertain", algorithm_outliers="Algorithm flags", quantity_rejected="Small suspicious exclusions",
+                  max_deviation_rejected="Trend-cap exclusions", jf_policy_reason="Policy decision", jf_algorithm_status="Algorithm status",
+                  jf_algorithm_reason="Algorithm reason", jf_algorithm_is_outlier="Algorithm outlier", jf_quantity="Normalized notional",
+                  jf_quantity_notional="Normalized notional", jf_quantity_valid="Valid Quantity", jf_support_trend="Independent support trend",
+                  jf_support_reliable="Reliable support", jf_support_residual="Support-trend residual", jf_support_distance_bps="Support distance · bp")
     for name in ["coverage", "flagged_rate", "flag_rate", "hard_retention"]:
         if name in shown:
             shown[name] = shown[name].map(lambda value: f"{value:.1%}" if pd.notna(value) else "—")
@@ -250,11 +282,12 @@ def _table_html(frame, *, limit=200):
 def _kpi_html(stats):
     # UI LOGIC: Words, exact counts and explicit denominators accompany status colors.
     rate = f'{stats["flag_rate"]:.1%}' if np.isfinite(stats["flag_rate"]) else "—"
-    items = [("Supplied trades", f'{stats["total"]:,}'), ("Evaluated", f'{stats["evaluated"]:,}'),
-             ("Flagged outliers", f'{stats["outliers"]:,}'), ("Flag rate / evaluated", rate),
+    items = [("Supplied trades", f'{stats["total"]:,}'), ("Algorithm assessed", f'{stats["evaluated"]:,}'),
+             ("Final outlier flags", f'{stats["outliers"]:,}'), ("Flags / algorithm assessed", rate),
              ("Insufficient support", f'{stats["unsupported"]:,}'), ("Invalid input", f'{stats["invalid"]:,}')]
     classes = ["", "", " jf-kpi-alert", " jf-kpi-rate", "", ""]
-    return '<div class="jf-kpis">' + ''.join(f'<div class="jf-kpi{style}"><strong>{value}</strong><span>{label}</span></div>' for (label, value), style in zip(items, classes)) + '</div>'
+    return ('<div class="jf-kpis">' + ''.join(f'<div class="jf-kpi{style}"><strong>{value}</strong><span>{label}</span></div>' for (label, value), style in zip(items, classes)) + '</div>' +
+            f'<p class="jf-help">Final fit eligible: {stats["fit_eligible"]:,} · explicitly retained uncertain: {stats["retained_uncertain"]:,} · original algorithm flags: {stats["algorithm_outliers"]:,} · small suspicious exclusions: {stats["quantity_rejected"]:,} · support-trend cap exclusions: {stats["max_deviation_rejected"]:,}. The assessed flag rate excludes unassessed policy decisions.</p>')
 
 
 def _notebook_figure(figure):
@@ -304,14 +337,14 @@ class FilterDashboard:
     or every supplied row after choosing All bonds (batch) and applying.
     """
 
-    def __init__(self, data, *, config=None, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", unit="bp", session_schedule=None):
+    def __init__(self, data, *, config=None, cusip_col="CUSIP", time_col="time", spread_col="spread", quantity_col=None, timezone="UTC", unit="bp", session_schedule=None):
         # SETUP LOGIC: Copy caller data; keep optional notebook dependencies outside package imports.
         import ipywidgets as w
         from . import FilterConfig, METHODS
         from .plots import METHOD_LABELS
         self.w, self.data = w, data.copy()
         self.config = config or FilterConfig(time_basis="trading")
-        self.mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, timezone=timezone)
+        self.mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, quantity_col=quantity_col, timezone=timezone)
         self.unit, self.result, self.applied_config = unit, None, None
         self.applied_scope, self._applied_record = "selected", None
         self._view_bond = None
@@ -325,6 +358,8 @@ class FilterDashboard:
         # VALIDATION LOGIC: Fail early for a bad mapping, before showing controls that cannot run.
         if not all(column in data for column in [cusip_col, time_col, spread_col]):
             raise ValueError("CUSIP, time and spread mappings must name existing columns.")
+        if quantity_col is not None and quantity_col not in data:
+            raise ValueError("Quantity mapping must name an existing column or be None.")
         # UI LOGIC: Exact values drive selection; text labels are presentation only.
         self.workspace = ReviewWorkspace(self.data, self.mapping)
         values = self.workspace.bonds
@@ -372,6 +407,32 @@ class FilterDashboard:
                            w.HTML(f'<p class="jf-help">{escape(PARAMETER_HELP[name])}</p>')]).add_class("jf-param")
             self._param_cards[name] = card
             param_cards.append(card)
+        # UI LOGIC: Optional policy controls are independent of the selected statistical method.
+        self.quantity_rule = w.Checkbox(value=self.config.quantity_rule, description="Enable Quantity-sensitive screening")
+        self.max_deviation_rule = w.Checkbox(value=self.config.max_deviation_rule, description="Enable maximum support-trend deviation")
+        self.quantity_col = w.Dropdown(description="Quantity column", options=[("Not mapped", None), *[(str(name), name) for name in data.columns]], value=quantity_col)
+        quantity_options = [("Raw amount · 1MM = 1,000,000", 1.), ("Thousands · 1MM = 1,000", 1000.), ("Millions · 1MM = 1", 1000000.)]
+        spread_options = [("Basis points · 1 bp = 1", 1.), ("Percentage points · 1 bp = 0.01", .01), ("Decimal · 1 bp = 0.0001", .0001)]
+        if self.config.quantity_multiplier not in [value for _, value in quantity_options]:
+            quantity_options.append((f"Custom multiplier · {self.config.quantity_multiplier:g}", float(self.config.quantity_multiplier)))
+        if self.config.spread_units_per_bp not in [value for _, value in spread_options]:
+            spread_options.append((f"Custom units per bp · {self.config.spread_units_per_bp:g}", float(self.config.spread_units_per_bp)))
+        self.quantity_multiplier = w.Dropdown(description="Quantity units", options=quantity_options, value=float(self.config.quantity_multiplier))
+        self.spread_units_per_bp = w.Dropdown(description="Spread numeric units", options=spread_options, value=float(self.config.spread_units_per_bp))
+        self.policy_params, self._policy_sliders, policy_cards = {}, {}, []
+        # UI LOGIC: Start the raw-amount slider at 1 with unit steps so the default 1MM lies exactly on its frontend grid.
+        # Trick: Float traits preserve precise typed amounts even between slider ticks; Apply reads the exact input value.
+        for name, label, lower, upper, step in [("quantity_threshold", "Small-trade threshold · notional amount", 1., 10000000., 1.), ("max_deviation_bps", "Maximum trend deviation · bp", .1, 100., .1)]:
+            value = float(getattr(self.config, name))
+            slider = w.FloatSlider(value=value, min=min(lower, value), max=max(upper, value), step=step, readout=False, continuous_update=False,
+                                   description=label, tooltip=PARAMETER_HELP[name], style={"description_width": "0px"})
+            number = w.BoundedFloatText(value=value, min=min(lower, value), max=max(upper, value), step=step,
+                                       description=f"Exact value · {label}", tooltip="Exact value. " + PARAMETER_HELP[name], style={"description_width": "0px"})
+            w.link((slider, "value"), (number, "value"))
+            self.policy_params[name], self._policy_sliders[name] = number, slider
+            values_row = w.HBox([slider, number], layout=w.Layout(width="100%")).add_class("jf-param-values")
+            policy_cards.append(w.VBox([w.HTML(f'<div class="jf-param-title">{escape(label)}</div>'), values_row, w.HTML(f'<p class="jf-help">{escape(PARAMETER_HELP[name])}</p>')]).add_class("jf-param"))
+        self._policy_controls = [self.quantity_rule, self.quantity_col, self.quantity_multiplier, self.max_deviation_rule, self.spread_units_per_bp, *self.policy_params.values()]
         self.horizon = w.Text(value=str(self.config.horizon), description="Reference horizon (e.g. 3D)")
         self.max_gap = w.Text(value=str(self.config.max_gap), description="Session break gap (e.g. 1D)")
         self.time_basis = w.Dropdown(options=[("Cumulative trading time", "trading"), ("Wall-clock time", "wall")], value=self.config.time_basis, description="Distance clock")
@@ -380,8 +441,8 @@ class FilterDashboard:
         self.session_close = w.Text(value=self.config.session_close, description="Weekday session closes")
         self.holidays = w.Text(value=", ".join(self.config.holidays), description="Closed dates · YYYY-MM-DD, ...")
         self._calendar_controls = [self.time_basis, self.session_timezone, self.session_open, self.session_close, self.holidays]
-        self._controls = [self.method, self.scope, self.horizon, self.max_gap, *self._calendar_controls, *self.params.values()]
-        for control in [self.cusip, self.cusip_search, self.scope, self.method, self.horizon, self.max_gap, self.export_path, *self._calendar_controls]:
+        self._controls = [self.method, self.scope, self.horizon, self.max_gap, *self._calendar_controls, *self.params.values(), *self._policy_controls]
+        for control in [self.cusip, self.cusip_search, self.scope, self.method, self.horizon, self.max_gap, self.export_path, *self._calendar_controls, self.quantity_rule, self.quantity_col, self.quantity_multiplier, self.max_deviation_rule, self.spread_units_per_bp]:
             control.add_class("jf-control")
             control.style.description_width = "initial"
         # UI LOGIC: CUSIP selection changes the view only; parameter edits await explicit Apply.
@@ -401,9 +462,13 @@ class FilterDashboard:
         calendar = w.VBox([self._row(self.time_basis, self.session_timezone), self._row(self.session_open, self.session_close), self.holidays,
                            w.HTML('<p class="jf-help">Trading time compresses scheduled nights, weekends and listed holidays while retaining inactivity during open sessions. The session calendar is a configurable research assumption. In trading mode, horizon and max_gap measure cumulative open time. Charts always use actual UTC timestamps. Supply an authoritative session_schedule for exact holidays and early closes.</p>')])
         parameter_grid = w.Box(param_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
-        settings = w.Accordion(children=[w.VBox([parameter_grid, self._row(self.horizon, self.max_gap)]), calendar], selected_index=None)
+        policy_grid = w.Box(policy_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
+        policies = w.VBox([self.quantity_rule, self._row(self.quantity_col, self.quantity_multiplier), self.max_deviation_rule,
+                           self.spread_units_per_bp, policy_grid, w.HTML('<p class="jf-help">Both rules are optional. Small trades are excluded only with suspicious evidence. Known positive Quantity can retain weak-evidence records explicitly as retained uncertain; confirmed algorithm outliers remain excluded at every size. Independent support follows separate left/right trends where both sides have enough references; disagreement disables the hard cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. No Quantity or spread units are inferred from labels.</p>')])
+        settings = w.Accordion(children=[w.VBox([parameter_grid, self._row(self.horizon, self.max_gap)]), calendar, policies], selected_index=None)
         settings.set_title(0, "Tune detection · relevant parameters and exact values")
         settings.set_title(1, "Trading calendar · sessions, closures and gaps")
+        settings.set_title(2, "Optional screening · Quantity and support-trend distance")
         self.pending.add_class("jf-state-area")
         actions = self._row(self.apply_button, self.compare_button, self.pending).add_class("jf-actionbar")
         search = [self._row(self.cusip_search), self.cusip_matches] if len(values) > 250 else []
@@ -452,7 +517,10 @@ class FilterDashboard:
                             time_basis=self.time_basis.value, session_timezone=self.session_timezone.value,
                             session_open=self.session_open.value, session_close=self.session_close.value,
                             holidays=tuple(value.strip() for value in self.holidays.value.split(",") if value.strip()),
-                            **{name: control.value for name, control in self.params.items()})
+                            quantity_rule=self.quantity_rule.value, quantity_multiplier=self.quantity_multiplier.value,
+                            max_deviation_rule=self.max_deviation_rule.value, spread_units_per_bp=self.spread_units_per_bp.value,
+                            **{name: control.value for name, control in self.params.items()},
+                            **{name: control.value for name, control in self.policy_params.items()})
 
     def _help_changed(self, _=None):
         # UI LOGIC: Show and enable only parameters used by the currently selected method.
@@ -460,6 +528,8 @@ class FilterDashboard:
         mode = card["mode"].partition(" · ")[0]
         self.help.value = (f'<div class="jf-method-context"><span class="jf-badge">{escape(mode)}</span>'
                            '<p class="jf-help">' + escape(METHOD_HELP[self.method.value]) + '</p></div>')
+        if (self.quantity_rule.value or self.max_deviation_rule.value) and self.method.value == "causal_ewma":
+            self.help.value += '<p class="jf-help">Optional screening uses a centered support trend and can use future trades; the final policy decisions are retrospective even though the original EWMA algorithm is causal.</p>'
         for control in [self.session_timezone, self.session_open, self.session_close, self.holidays]:
             control.disabled = self.busy or self.session_schedule is not None or self.time_basis.value == "wall"
         relevant = METHOD_EXPLANATIONS[self.method.value]["parameters"]
@@ -467,6 +537,12 @@ class FilterDashboard:
             control.disabled = self.busy or name not in relevant
             self._param_sliders[name].disabled = self.busy or name not in relevant
             self._param_cards[name].layout.display = "" if name in relevant else "none"
+        # UI LOGIC: Inactive policy values remain visible for auditing but cannot accidentally edit a running review.
+        for control in [self.quantity_col, self.quantity_multiplier, self.policy_params["quantity_threshold"], self._policy_sliders["quantity_threshold"]]:
+            control.disabled = self.busy or not self.quantity_rule.value
+        for control in [self.policy_params["max_deviation_bps"], self._policy_sliders["max_deviation_bps"]]:
+            control.disabled = self.busy or not self.max_deviation_rule.value
+        self.spread_units_per_bp.disabled = self.busy or not (self.quantity_rule.value or self.max_deviation_rule.value)
 
     def _render_explanation(self):
         # UI LOGIC: Group native mathematics into progressive sections without removing any formula or example.
@@ -476,7 +552,8 @@ class FilterDashboard:
         groups = [("Detection method · equations and worked example", card["steps"]),
                   ("Shared preparation · timestamps, cohorts and support", COMMON_STEPS),
                   ("Trading clock · irregular events and session boundaries", CLOCK_STEPS),
-                  ("Fitting policy · eligibility and suggested influence weights", FITTING_STEPS)]
+                  ("Fitting policy · eligibility and suggested influence weights", FITTING_STEPS),
+                  ("Optional screening · Quantity and reliable support trend", POLICY_STEPS)]
         sections = []
         for index, (_, steps) in enumerate(groups):
             section = self.w.Output(layout=self.w.Layout(width="100%")).add_class("jf-math-section")
@@ -501,6 +578,13 @@ class FilterDashboard:
                  ("session_open", self.session_open.value, "Weekday regular open"),
                  ("session_close", self.session_close.value, "Weekday regular close"),
                  ("holidays", self.holidays.value, "Explicit full-day closures")]
+        rows += [("quantity_rule", self.quantity_rule.value, "Enable the explicitly optional Quantity policy"),
+                 ("quantity_col", self.quantity_col.value, "Mapped source Quantity column; required when Quantity screening is enabled"),
+                 ("quantity_multiplier", self.quantity_multiplier.value, PARAMETER_HELP["quantity_multiplier"]),
+                 ("quantity_threshold", self.policy_params["quantity_threshold"].value, PARAMETER_HELP["quantity_threshold"]),
+                 ("max_deviation_rule", self.max_deviation_rule.value, "Enable reliable support-trend distance exclusion"),
+                 ("max_deviation_bps", self.policy_params["max_deviation_bps"].value, PARAMETER_HELP["max_deviation_bps"]),
+                 ("spread_units_per_bp", self.spread_units_per_bp.value, PARAMETER_HELP["spread_units_per_bp"])]
         contents = [HTML(_table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"])))]
         if self.session_schedule is not None:
             contents.append(HTML('<p class="jf-help">An authoritative session_schedule was supplied; trading mode uses only its intervals and overrides weekday calendar controls.</p>' + _table_html(self.session_schedule)))
@@ -509,7 +593,7 @@ class FilterDashboard:
         accordion = self.w.Accordion(children=sections, selected_index=0)
         for index, (title, _) in enumerate(groups):
             accordion.set_title(index, title)
-        accordion.set_title(4, "Selected parameter values · complete audit")
+        accordion.set_title(len(groups), "Selected parameter values · complete audit")
         _replace_outputs(self.explanation,
                          HTML(f'<h3>{escape(card["name"])}</h3><p class="jf-help">{escape(card["mode"])} · Explanation: selected method {escape(self.method.value)} · Applied plots/exports: {escape(applied)}</p><p>{escape(card["summary"])}</p>'),
                          accordion)
@@ -564,7 +648,7 @@ class FilterDashboard:
         from IPython.display import HTML
         self.kpis.value = f'<p class="jf-help">Headline counts · selected bond {escape(str(self.cusip.value))}. Statistics and annotated exports · {"all bonds" if self.applied_scope == "all" else "selected bond"}.</p>' + _kpi_html(evaluation_summary(selected))
         contents = [HTML('<div class="jf-section-heading"><h4>Spread history &amp; review flags</h4><span class="jf-help">Actual trade timestamps · UTC</span></div>'),
-                    figure, HTML('<p class="jf-help">Red crosses indicate statistical outliers; amber markers identify level changes or provisional jumps. Hover for scores, reference support and reasons.</p>')]
+                    figure, HTML('<p class="jf-help">Red crosses mark final outlier exclusions, including optional policy decisions. Gray open circles are unscored; amber open circles are explicitly retained uncertain and fit eligible; amber open diamonds mark unresolved transitions. Shading shows the method\'s statistical cutoff. Optional dashed limits show the separate support-trend distance cap. Closures, configured gap breaks and missing usable references interrupt both paths. Hover for exact evidence and reasons.</p>')]
         counts = figure.layout.meta or {}
         if counts.get("sampled"):
             contents.append(HTML(f'<p class="jf-help">Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports retain every reviewed trade.</p>'))
@@ -580,11 +664,13 @@ class FilterDashboard:
         population = "All bonds" if self.applied_scope == "all" else "Selected bond"
         groups = [(f"{population} · evaluation and fitting coverage", '<h4>Bond overview · applied method</h4>' + _table_html(overview) + full_summary +
                    f'<h4>{population} · fitting coverage and retention</h4>' + _table_html(fitting) +
-                   '<p class="jf-help">Hard fit: jf_fit_eligible / status ok and unflagged. Soft fit: status ok or outlier with positive suggested influence weight. Provisional jumps, ambiguous transitions, invalid inputs, unsupported rows and solver failures are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size.</p>'),
+                   '<p class="jf-help">Hard fit follows final jf_fit_eligible. Optional Quantity screening can explicitly retain uncertain records; these remain unassessed in algorithm coverage. Soft fit includes positive suggested weights for ok, original outlier and retained-uncertain records. Optional policy exclusions have zero weight. Invalid, outside-session and solver-failure records stay excluded. Weight sum is not an effective sample size.</p>'),
                   ("Selected bond · daily support and decision reasons", '<h4>Observed daily support</h4>' + _table_html(audits["daily"]) +
                    '<h4>Flag and support reasons</h4>' + _table_html(audits["reasons"])),
                   ("Selected bond · liquidity and local uncertainty", _table_html(selected[[name for name in support_columns if name in selected]])),
                   ("Selected bond · complete trade audit", _table_html(selected))]
+        if "policy_reasons" in audits:
+            groups.insert(2, ("Selected bond · optional policy decisions", '<h4>Optional policy decisions</h4>' + _table_html(audits["policy_reasons"])))
         sections = []
         for _, contents in groups:
             section = self.w.Output(layout=self.w.Layout(width="100%"))
@@ -615,11 +701,14 @@ class FilterDashboard:
             return self
         self._lock(True)
         self.status.value = '<div class="jf-status">Evaluating supplied trades…</div>'
-        previous = self.applied_config, self.applied_scope
+        previous = self.applied_config, self.applied_scope, self.mapping, self.workspace
         try:
             config = self._configuration()
             schedule = self.session_schedule.copy(deep=True) if self.session_schedule is not None else None
-            record = self.workspace.review(config, scope=self.scope.value, bond=self.cusip.value, session_schedule=schedule)
+            mapping = dict(self.mapping, quantity_col=self.quantity_col.value)
+            workspace = self.workspace if mapping == self.mapping else ReviewWorkspace(self.data, mapping)
+            record = workspace.review(config, scope=self.scope.value, bond=self.cusip.value, session_schedule=schedule)
+            self.mapping, self.workspace = mapping, workspace
             self.applied_config, self.applied_scope = config, self.scope.value
             if record is not self._applied_record or self.cusip.value != self._view_bond:
                 rendered = self._render(record)
@@ -633,7 +722,7 @@ class FilterDashboard:
             population = "All bonds (batch)" if self.applied_scope == "all" else f"Selected bond {self.cusip.value}"
             self.status.value = f'<div class="jf-status">{escape(population)} · applied {escape(config.method)} to {len(self.result):,} of {len(self.data):,} source rows. Exports contain this review population.</div>'
         except Exception as exc:
-            self.applied_config, self.applied_scope = previous
+            self.applied_config, self.applied_scope, self.mapping, self.workspace = previous
             self.status.value = '<div class="jf-status jf-status-error">Could not apply settings: ' + escape(str(exc)) + '</div>'
         finally:
             self._lock(False)
@@ -710,6 +799,8 @@ class FilterDashboard:
             settings = dict(config=asdict(self.applied_config), mapping=self.mapping, unit=self.unit,
                             selected_cusip=str(self.cusip.value), rows=len(self.result), source_rows=len(self.data), review_scope=self.applied_scope, source="applied result",
                             calendar=self.result.attrs.get("jump_filter", {}).get("calendar"))
+            if "jf_policy_reason" in self.result:
+                settings["optional_policy_counts"] = self.result["jf_policy_reason"].value_counts(dropna=False).to_dict()
             if self.applied_schedule is not None:
                 self.applied_schedule.to_csv(output / "session_schedule.csv", index=False)
             figure = trade_figure(self._selected(self.result), cusip_col=self.mapping["cusip_col"],

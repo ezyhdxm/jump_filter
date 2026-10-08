@@ -24,6 +24,9 @@
 # level and conservative consensus.
 # The trading-calendar controls remove configured closures from time distances;
 # local support, volatility, reference density and active gaps remain auditable.
+# Optional fitting rules add quantity-aware handling of uncertain trades and a
+# maximum distance from a supported trend. They are off initially; the generated
+# `Quantity` column lets you inspect the controls without a private trade file.
 
 # %%
 # SETUP LOGIC: Imports create no filtering result and read no private dataset.
@@ -41,7 +44,7 @@ settings = FilterConfig(method="consensus", window=31, horizon="3D", max_gap="1D
 
 # UI LOGIC: All algorithm settings can be changed through sliders and exact input boxes.
 panel = show_filter(data, config=settings, cusip_col="CUSIP", time_col="time",
-                    spread_col="spread", timezone="UTC", unit="bp")
+                    spread_col="spread", quantity_col="Quantity", timezone="UTC", unit="bp")
 _ = panel.run()
 
 # %% [markdown]
@@ -51,6 +54,20 @@ _ = panel.run()
 # For example, BondCliQ data can map `CUSIP`, `time`, and `BM_SPREAD`.
 # If `BM_SPREAD` is in percentage points, use `unit="percentage points"`
 # and choose `abs_floor` in the same units (1 bp = 0.01 percentage points).
+# In Optional fitting rules, select your quantity column. Original amounts use
+# quantity_multiplier=1, so the default 1MM threshold is 1,000,000. Columns in
+# thousands or millions require multipliers of 1,000 or 1,000,000 respectively.
+# The distance rule is expressed in bp; explicitly set spread_units_per_bp=0.01
+# for percentage-point spreads (or 1 for spreads already in bp). Labels do not
+# convert observations. The default distance boundary is strictly greater than
+# 10 bp, and quantities equal to 1MM are not treated as small trades.
+# Quantity alone does not reject a small trade. For uncertain statistical cases,
+# small and suspicious trades are rejected; otherwise valid known-size cases
+# are retained with status `retained_uncertain`. Strong algorithm outliers still
+# reject any size. Missing quantity leaves the algorithm decision unchanged.
+# The maximum-distance rule needs a bracketed local trend with sufficient support;
+# it does not construct evidence across a gap or infer a trend where none exists.
+# Original algorithm evidence and the final fitting decision are both exported.
 # The engine preserves original rows and index; flags and reasons are added.
 #
 # Three columns cannot identify whether a flagged trade was retail, distressed,
@@ -86,6 +103,7 @@ hard_fit = select_fit_data(panel.result, policy="hard")
 soft_fit = select_fit_data(panel.result, policy="soft")
 
 # REPORTING LOGIC: Hard fit keeps jf_fit_eligible with weight 1; soft fit exposes jf_fit_weight.
-# Unsupported/invalid/provisional/ambiguous-transition/solver-failure rows are excluded.
+# With optional rules off, unsupported/invalid/provisional/ambiguous/solver-failure rows are excluded.
+# An enabled quantity rule can explicitly retain valid uncertain rows; their uncertainty stays auditable.
 # Soft weights limit influence; they are neither probabilities nor inverse variances.
 print(f"Source: {len(data):,}; applied review: {len(panel.result):,}; hard-fit candidates: {len(hard_fit):,}; soft-fit candidates: {len(soft_fit):,}")

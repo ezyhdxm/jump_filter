@@ -12,7 +12,10 @@ METHODS = ("hampel", "rolling_iqr", "local_linear", "jump_reversion", "multiscal
 
 @dataclass(frozen=True)
 class FilterConfig:
-    """Window counts distinct timestamps; all spread controls use input units."""
+    """Window counts distinct timestamps; algorithm controls use input spread units.
+
+    The optional absolute cap uses bp through explicit ``spread_units_per_bp``.
+    """
 
     # CONFIGURATION LOGIC: retrospective defaults require future observations.
     method: str = "consensus"
@@ -36,11 +39,24 @@ class FilterConfig:
     session_open: str = "08:00"
     session_close: str = "18:30"
     holidays: tuple[str, ...] = ()
+    quantity_rule: bool = False
+    quantity_threshold: float = 1_000_000.0
+    quantity_multiplier: float = 1.0
+    max_deviation_rule: bool = False
+    max_deviation_bps: float = 10.0
+    spread_units_per_bp: float = 1.0
 
     def __post_init__(self):
         # CONFIGURATION LOGIC: fail before processing on incompatible controls.
         if self.method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}")
+        for name in ("quantity_rule", "max_deviation_rule"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+        for name in ("quantity_threshold", "quantity_multiplier", "max_deviation_bps", "spread_units_per_bp"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
         for name in ("window", "min_neighbors", "persistence", "multiscale_votes", "max_iter"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):

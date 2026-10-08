@@ -1,6 +1,6 @@
-# Mathematics of the nine filtering methods
+# Mathematics of filtering methods and optional fitting rules
 
-These formulas share their source with the Method & mathematics panels in the browser and Jupyter notebook dashboards. The input contains only CUSIP, time, and spread. The baseline is a robust diagnostic reference; it does not identify the true mid price, commission, or trader type.
+These formulas share their source with the Method & mathematics panels in the browser and Jupyter notebook dashboards. Core algorithms require CUSIP, time, and spread; an optional quantity column adds explicit fitting rules. A diagnostic reference does not identify an observed economic mid, commission, or trader type.
 
 ## 1 · Data and centered neighborhood
 
@@ -36,8 +36,6 @@ $$
 
 ## `hampel` · Local Hampel · Median and MAD
 
-Offline / centered · Uses earlier and later trades
-
 Measure each trade against a robust center from earlier and later trades in the same bond. This is useful for isolated deviations resembling markups or markdowns.
 
 ### 3 · Median reference and MAD decision
@@ -52,11 +50,9 @@ $$
 
 Reference spreads = [100,100,100,100,100,100] bp; target = 130 bp, q = 4.5, a = 1 bp: b = 100, MAD = 0, σ = 1/4.5 ≈ 0.222222 bp, B = 1 bp, score = 135; flag the outlier. A target of 101 bp is exactly on the boundary and is not flagged.
 
-### Assumptions and limitations
+### Tradeoffs
 
 Simple and easy to audit. Genuine level changes can trigger false positives; consecutive outliers that form a majority of the neighborhood contaminate both the median and MAD. For a smooth trend, consider local_linear.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -65,11 +61,9 @@ Simple and easy to audit. Genuine level changes can trigger false positives; con
 | `abs_floor` | Absolute deviation floor a, in exactly the same units as the input spread. If spreads are in bp, 1.0 means 1 bp. |
 | `threshold` | MAD-standardized deviation threshold q. Increasing it reduces flags; equality at the boundary is not flagged. IQR does not use this parameter; iqr_multiplier controls its sensitivity. |
 
-Primary source: [Pearson et al. (2016), Generalized Hampel Filters](https://acris.aalto.fi/ws/portalfiles/portal/13003265/art_10.1186_s13634_016_0383_6.pdf). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Pearson et al. (2016), Generalized Hampel Filters](https://acris.aalto.fi/ws/portalfiles/portal/13003265/art_10.1186_s13634_016_0383_6.pdf). Local extensions are engineering adaptations in this repository.
 
 ## `rolling_iqr` · Rolling IQR fences · Local quantile boundaries
-
-Offline / centered · Uses earlier and later trades
 
 Construct outer Tukey fences from the local interquartile range. This is an alternative robust scale to MAD and requires neither symmetric nor normal residuals.
 
@@ -93,11 +87,9 @@ $$
 
 References = [99,100,100,101,101,102] bp: Q1 = 100, Q3 = 101, IQR = 1. With k = 3 and a = 1, b = 100.5, B = 3.5, and the acceptable interval is [97,104] bp. Flag 105 bp; do not flag 104 bp. σ ≈ 0.741301 bp.
 
-### Assumptions and limitations
+### Tradeoffs
 
 The deviation boundary has a direct quantile-fence interpretation. Small samples, quantized spreads, or outlier clusters can make quantiles unstable. There is no additional guard around genuine market jumps, and k is not an outlier probability.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -106,11 +98,9 @@ The deviation boundary has a direct quantile-fence interpretation. Small samples
 | `abs_floor` | Absolute deviation floor a, in exactly the same units as the input spread. If spreads are in bp, 1.0 means 1 bp. |
 | `iqr_multiplier` | IQR multiplier k for Tukey fences. Increasing it widens the acceptable interval. |
 
-Primary source: [NIST Engineering Statistics Handbook, Box Plot / Tukey fences](https://www.itl.nist.gov/div898/handbook/eda/section3/boxplot.htm). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [NIST Engineering Statistics Handbook, Box Plot / Tukey fences](https://www.itl.nist.gov/div898/handbook/eda/section3/boxplot.htm). Local extensions are engineering adaptations in this repository.
 
 ## `local_linear` · Robust local linear · Local time trend
-
-Offline / centered · Uses earlier and later trades
 
 Fit a local trend, then measure the target print against it. Ordinary spread drift should not cause rejection solely because it differs from the window median.
 
@@ -134,11 +124,9 @@ $$
 
 Neighbor times = [0,1,2,4,5,6], spreads = [100,101,102,104,105,106] bp; target time = 3, spread = 130. The local linear prediction is b ≈ 103 bp and the final residuals are ≈ 0. With q = 4.5 and a = 1, B = 1 bp. The target residual is ≈ 27 bp and score ≈ 121.5; flag it. A normal 103 bp print is not flagged.
 
-### Assumptions and limitations
+### Tradeoffs
 
 Useful for smooth drift and irregular trade intervals. Genuine abrupt jumps, curved trends, and contaminated short windows affect the result. Side extrapolations carry no market-structure guarantee.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -147,11 +135,9 @@ Useful for smooth drift and irregular trade intervals. Genuine abrupt jumps, cur
 | `abs_floor` | Absolute deviation floor a, in exactly the same units as the input spread. If spreads are in bp, 1.0 means 1 bp. |
 | `threshold` | MAD-standardized deviation threshold q. Increasing it reduces flags; equality at the boundary is not flagged. IQR does not use this parameter; iqr_multiplier controls its sensitivity. |
 
-Primary source: [Cleveland (1979), Robust Locally Weighted Regression](https://sites.stat.washington.edu/courses/stat527/s13/readings/Cleveland_JASA_1979.pdf). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Cleveland (1979), Robust Locally Weighted Regression](https://sites.stat.washington.edu/courses/stat527/s13/readings/Cleveland_JASA_1979.pdf). Local extensions are engineering adaptations in this repository.
 
 ## `local_piecewise` · Two-sided local piecewise trend · Independent side trends
-
-Offline / independent side fits · Checks trend turning points
 
 Fit the earlier and later trends separately and project both to the target time. Independent side trends can explain a normal rise-then-fall turning point, avoiding the mistake of treating the peak as an outlier relative to a single straight line.
 
@@ -175,11 +161,9 @@ $$
 
 time = [0,1,2,3,4,5,6], spread = [100,101,102,103,102,101,100] bp. At target time = 3, the left trend extrapolates to approximately 103 and the right trend projects backward to approximately 103, so the normal 103 peak is not flagged. If the target print at that time is 130, both sides still predict 103, allowing the approximately 27 bp deviation to be flagged.
 
-### Assumptions and limitations
+### Tradeoffs
 
 A continuous slope change is easier to confirm from both sides than an abrupt level jump. Irregular trades, contaminated short sides, and strong curvature can still make extrapolation unreliable. An unresolved transition with disagreeing side predictions reduces fitting coverage; include this abstention in the statistics.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -189,11 +173,9 @@ A continuous slope change is easier to confirm from both sides than an abrupt le
 | `threshold` | MAD-standardized deviation threshold q. Increasing it reduces flags; equality at the boundary is not flagged. IQR does not use this parameter; iqr_multiplier controls its sensitivity. |
 | `reversion_tolerance` | Tolerance v for the difference between left and right reference centers. Increasing it makes a return to the previous level easier to confirm. |
 
-Primary source: [Cleveland (1979), robust local regression (component inspiration)](https://sites.stat.washington.edu/courses/stat527/s13/readings/Cleveland_JASA_1979.pdf). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Cleveland (1979), robust local regression (component inspiration)](https://sites.stat.washington.edu/courses/stat527/s13/readings/Cleveland_JASA_1979.pdf). Local extensions are engineering adaptations in this repository.
 
 ## `jump_reversion` · Jump and reversion · Return-to-level confirmation
-
-Offline / two-sided confirmation · Requires support on both sides
 
 Treat a middle deviation as a suspected execution effect only when the earlier and later centers return to the same level; protect a persistent new market level.
 
@@ -217,11 +199,9 @@ $$
 
 Left [100,100,100], right [100,100,100], target 130 bp: b = 100, Δ = 0. With q = 4.5, a = 1, v = 2, reversion is confirmed and the deviation 30 > 1 is flagged. Change the right side to [130,130,130]: Δ = 30 > 1, so the persistent level change is protected.
 
-### Assumptions and limitations
+### Tradeoffs
 
 Useful for protecting genuine level shifts. At the beginning or end of a series, missing support on one side causes abstention. A brief genuine market move can resemble an outlier, and a long burst can contaminate both sides. This is an engineering rule based on three columns, not a formal changepoint test.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -231,11 +211,9 @@ Useful for protecting genuine level shifts. At the beginning or end of a series,
 | `threshold` | MAD-standardized deviation threshold q. Increasing it reduces flags; equality at the boundary is not flagged. IQR does not use this parameter; iqr_multiplier controls its sensitivity. |
 | `reversion_tolerance` | Tolerance v for the difference between left and right reference centers. Increasing it makes a return to the previous level easier to confirm. |
 
-Primary source: [Killick et al. (2012), changepoint framework (context; this rule is not PELT)](https://arxiv.org/abs/1101.1438). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Killick et al. (2012), changepoint framework (context; this rule is not PELT)](https://arxiv.org/abs/1101.1438). Local extensions are engineering adaptations in this repository.
 
 ## `multiscale` · Multiscale confirmation · Agreement across neighborhood sizes
-
-Offline / centered · Uses earlier and later trades
 
 Repeat the assessment over short, medium, and long neighborhoods to reduce deviations that appear exceptional only at one window size, aiming for greater robustness to clusters and window selection.
 
@@ -259,11 +237,9 @@ $$
 
 Three supported scales have center = [100,101,109], scale = [1,1,1] bp; target = 110, q = 4.5, a = 1: scores = [10,9,1], votes = [True,True,False]. With V = 2, flag the target and display the first scale with baseline = 100, B = 4.5. With V = 3, do not flag it.
 
-### Assumptions and limitations
+### Tradeoffs
 
 The scales share data, so votes are neither independent evidence nor statistical significance. Requiring more votes lowers sensitivity; sparse data can cause abstention through insufficient support. There is no mandatory repricing guard; compare with consensus / robust_trend.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -273,11 +249,9 @@ The scales share data, so votes are neither independent evidence nor statistical
 | `threshold` | MAD-standardized deviation threshold q. Increasing it reduces flags; equality at the boundary is not flagged. IQR does not use this parameter; iqr_multiplier controls its sensitivity. |
 | `multiscale_votes` | Minimum number of confirming scales among the three time/count scales; 2 requires a majority and 3 is more conservative. |
 
-Primary source: [Pearson et al. (2016), generalized robust local filters (inspiration)](https://acris.aalto.fi/ws/portalfiles/portal/13003265/art_10.1186_s13634_016_0383_6.pdf). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Pearson et al. (2016), generalized robust local filters (inspiration)](https://acris.aalto.fi/ws/portalfiles/portal/13003265/art_10.1186_s13634_016_0383_6.pdf). Local extensions are engineering adaptations in this repository.
 
 ## `robust_trend` · Offline robust TV trend · Robust segmented level
-
-Offline / whole segment · Joint level and sparse-deviation estimation
 
 Use earlier and later information across the entire trade segment, assigning persistent level changes to the trend b and sparse large deviations to the execution component h. This is another reference for historical filtering before fitting and requires calibration on real data.
 
@@ -325,11 +299,9 @@ $$
 
 Whole segment [100,100,100,130,100,100,100] bp, q = 4.5, a = 1, δ = 2.5, λ = 8: s0 = 2/9 bp. The convex optimum has a common baseline ≈ 100.092593 bp (numerical tolerances may cause small differences). The 130 bp residual is ≈ 29.907407 bp, local scale = 2/9, B = 1; flag it. The six 100 bp prints are not flagged. This example requires window ≥ 6, min_neighbors = 6, and a horizon covering the whole segment.
 
-### Assumptions and limitations
+### Tradeoffs
 
 A larger λ can oversmooth genuine jumps; a smaller λ can let the trend follow bad prints. For a large temporary internal block of height A and length L, fitting the block costs approximately 2λ|A| for its two TV edges; maintaining the baseline costs approximately L(δ|A|−δ²/2) under saturated Huber loss. This is only an approximate comparison in normalized units: long bursts are more likely to be treated as genuine levels, while brief genuine moves can be treated as outliers. Dense execution bias with a consistent direction is not identifiable from only these three columns.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -342,11 +314,9 @@ A larger λ can oversmooth genuine jumps; a smaller λ can let the trend follow 
 | `max_iter` | Maximum number of offline-trend solver iterations. A nonconverged solution retains diagnostics and abstains. Default: 2000. |
 | `tolerance` | Numerical convergence tolerance for the offline-trend solver; this is separate from the score threshold used to identify financial outliers. |
 
-Primary source: [Boyd et al. (2011), Distributed Optimization and Statistical Learning via ADMM](https://web.stanford.edu/~boyd/papers/admm_distr_stats.html). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Boyd et al. (2011), Distributed Optimization and Statistical Learning via ADMM](https://web.stanford.edu/~boyd/papers/admm_distr_stats.html). Local extensions are engineering adaptations in this repository.
 
 ## `consensus` · Conservative consensus · Robust evidence and reversion
-
-Offline / two-sided confirmation · Default research starting point
 
 Flag a trade only when Hampel or the local trend finds a large deviation and either raw levels or trend projections confirm reversion. This can protect persistent repricing while accommodating smooth drift.
 
@@ -370,11 +340,9 @@ $$
 
 time = [0,1,2,4,5,6], spread = [100,101,102,104,105,106] bp; target time = 3, spread = 130. Raw medians are 101 and 105; both trend projections are approximately 103. With q = 4.5 and a = 1, trend reversion is confirmed and L = True, so flag the target. A 103 bp target is not flagged.
 
-### Assumptions and limitations
+### Tradeoffs
 
 The default prioritizes avoiding rejection of persistent changes, but can miss very long bursts. Components are correlated, so agreement does not provide independent confidence. Curvature, contaminated side extrapolations, and series edges can reduce support or accuracy.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -384,11 +352,9 @@ The default prioritizes avoiding rejection of persistent changes, but can miss v
 | `threshold` | MAD-standardized deviation threshold q. Increasing it reduces flags; equality at the boundary is not flagged. IQR does not use this parameter; iqr_multiplier controls its sensitivity. |
 | `reversion_tolerance` | Tolerance v for the difference between left and right reference centers. Increasing it makes a return to the previous level easier to confirm. |
 
-Primary source: [Implementation and research discussion in docs/RESEARCH.md](https://github.com/ezyhdxm/jump_filter/blob/main/docs/RESEARCH.md). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Implementation and research discussion in docs/RESEARCH.md](https://github.com/ezyhdxm/jump_filter/blob/main/docs/RESEARCH.md). Local extensions are engineering adaptations in this repository.
 
 ## `causal_ewma` · Causal robust EWMA · Online comparator
-
-Optional online comparator · Uses past information only
 
 In an online setting, predict new trades from a historical robust level and confirm a new regime through consecutive same-direction deviations. When historical fitting does not require causality, start with the offline methods above.
 
@@ -412,11 +378,9 @@ $$
 
 Existing center = 100 bp, past σ = 1 bp, q = 4.5, a = 1, alpha = 0.2, new cohort median = 130: cutoff = 4.5 and deviation = 30, so flag it provisionally. Update the center to 100 + 0.2×4.5 = 100.9 bp. Confirmation at the third same-direction large innovation (persistence = 3) resets the center; the earlier two flags remain.
 
-### Assumptions and limitations
+### Tradeoffs
 
 An online baseline for checking future leakage. The first few trades of genuine repricing may be provisionally rejected; historical markups can also contaminate the scale. Offline methods can use subsequent evidence when filtering historical data.
-
-### Parameters
 
 | Parameter | Effect |
 |---|---|
@@ -427,20 +391,64 @@ An online baseline for checking future leakage. The first few trades of genuine 
 | `alpha` | EWMA update rate α per timestamp cohort; it is not adjusted for elapsed clock time. |
 | `persistence` | Number of consecutive large cohort innovations with the same sign; used only by the online comparator. |
 
-Primary source: [Implementation and causal-prefix discussion in docs/RESEARCH.md](https://github.com/ezyhdxm/jump_filter/blob/main/docs/RESEARCH.md). Local extensions are engineering adaptations in this repository; they do not claim to reproduce the published algorithm exactly.
+Primary source: [Implementation and causal-prefix discussion in docs/RESEARCH.md](https://github.com/ezyhdxm/jump_filter/blob/main/docs/RESEARCH.md). Local extensions are engineering adaptations in this repository.
 
 ## Use in a downstream fit
 
-Strict selection uses jf_fit_eligible, equivalent to status = ok with no outlier flag on the original spread. select_fit_data(result, policy='hard') returns those records and adds weight 1. Keep evaluated, unflagged shifts; do not replace the original trade spread with the baseline as if it were new evidence. invalid, insufficient_history, ambiguous_transition, solver_not_converged, and provisional_jump are not automatically treated as clean.
+Strict selection uses the final jf_fit_eligible mask. With optional rules disabled this means status = ok and no outlier flag. Quantity screening can explicitly include retained_uncertain records; that is a selection policy, not certification that their trades are clean. select_fit_data(result, policy='hard') returns the final selected records and adds weight 1. Original spreads remain unchanged. Invalid inputs, trades outside configured sessions, and solver failures stay excluded. Preserve algorithm assessment and policy decisions separately in every audit.
 
 $$
-\mathcal D_{\rm hard}=\{i:\texttt{jf\_fit\_eligible}_i\}=\{i:\texttt{jf\_status}_i=\texttt{ok}\ \land\ \neg\texttt{jf\_is\_outlier}_i\}
+\mathcal D_{\rm hard}=\{i:\texttt{jf\_fit\_eligible}_i\},\quad\text{rules off: }\mathcal D_{\rm hard}=\{i:\texttt{jf\_status}_i=\texttt{ok}\land\neg\texttt{jf\_is\_outlier}_i\}
 $$
 
 ## Optional influence weights and coverage
 
-select_fit_data(result, policy='soft') defaults to evaluated ok/outlier records and applies jf_fit_weight = jf_weight: unflagged weight 1, flagged weight cutoff / |residual| capped at 1. These weights suggest influence, not probability or inverse variance. Provisional records are excluded by default. Coverage uses all supplied rows as the denominator, so an apparently clean subset with almost no support cannot conceal poor coverage.
+select_fit_data(result, policy='soft') uses evaluated ok/outlier records and, when explicitly enabled, retained_uncertain records. It applies jf_fit_weight = jf_weight: unflagged weight 1, original statistical outlier weight cutoff / |residual| capped at 1. Optional policy exclusions have weight zero and remain excluded from both hard and soft fits. These weights suggest influence, not probability or inverse variance. Provisional records are excluded by default. Algorithm coverage retains its original assessment denominator; final retention includes any explicitly retained uncertainty.
 
 $$
-w_i=\begin{cases}1,&\text{evaluated and unflagged}\\\min(1,B_i/\max(|y_i-b_i|,10^{-12})),&\text{flagged}\end{cases},\quad\text{coverage}=N_{\rm evaluated}/N_{\rm supplied},\quad\text{hard retention}=|\mathcal D_{\rm hard}|/N_{\rm supplied}
+w_i=\begin{cases}0,&\text{optional policy exclusion}\\1,&\text{unflagged assessed or explicitly retained uncertain}\\\min(1,B_i/\max(|y_i-b_i|,10^{-12})),&\text{original statistical outlier}\end{cases},\quad\text{coverage}=N_{\rm algorithm\ assessed}/N_{\rm supplied},\quad\text{hard retention}=|\mathcal D_{\rm hard}|/N_{\rm supplied}
+$$
+
+## Optional Quantity and support-trend rules
+
+Both switches default off. See [the worked example and audit contract](OPTIONAL_RULES.md).
+
+### 1 · Quantity mapping and weak-evidence decisions
+
+Map any source column as Quantity and explicitly select its numeric units. Normalize notional Q = Quantity × quantity_multiplier. Only finite positive Q participates. The default cutoff M = 1,000,000 uses a strict Q < M comparison. The Quantity policy changes only weak algorithm decisions: insufficient_history, ambiguous_transition, or provisional_jump. An already evaluated ordinary trade keeps its decision; an algorithm-confirmed outlier remains excluded at every size. A weak small trade is excluded only when supported residual evidence is suspicious. Every other weak record with known positive Quantity is explicitly retained_uncertain. Unknown Quantity leaves the original abstention unchanged.
+
+$$
+Q_i=k_Q\,\texttt{Quantity}_i,\quad\text{small}_i=(0<Q_i<M),\quad W_i=\mathbf1\{\text{algorithm status}\in\{\text{insufficient, ambiguous, provisional}\}\},\quad E_i^Q=W_i\land\text{small}_i\land S_i
+$$
+
+### 2 · What counts as suspicious evidence
+
+When an independent reliable support trend exists, it governs suspicion: its finite residual must strictly exceed its own deviation cutoff. If it clears a trade, a weaker original bridge cannot overrule it. The support reference follows separate left/right robust lines when available; disagreement prevents use of a whole-line fallback. Without reliable support, only a history-supported causal provisional jump can fall back to its original residual cutoff; other missing support does not establish suspicion. Neither low Quantity by itself nor missing support establishes an outlier. Example: Q = 500,000 with weak evidence and suspicious supported residual is excluded; Q = 2,000,000 with the same weak evidence is retained uncertain unless the maximum-distance rule applies.
+
+$$
+S_i=\begin{cases}|y_i-b_i^{\rm support}|>B_i^{\rm support},&\text{reliable support}\\|r_i^{\rm original}|>B_i^{\rm original},&\text{supported causal provisional jump only}\\0,&\text{otherwise}\end{cases},\quad R_i^Q=W_i\land\text{valid }Q_i\land\neg E_i^Q
+$$
+
+### 3 · Shape-aware independent support
+
+Independently run local_piecewise with the same clock, reference window, horizon and gap boundaries, excluding the target timestamp cohort. Require at least min_neighbors total references and at least m = max(2, floor(min_neighbors/2)) on each side: defaults require three earlier and three later cohorts. Each side supplies its own robust local-linear prediction at the target time, allowing different slopes. If the predictions agree within max(abs_floor, reversion_tolerance × sigma), use their average and the maximum of their detrended MAD scales. If they disagree, support is unreliable and no whole-line fallback is allowed. Only insufficient side counts allow a whole-neighborhood local_linear fallback with enough total references, at least one strictly earlier and one strictly later reference, finite diagnostics and no protected persistent level transition. Thus a continuous turning point need not inflate the scale of a single straight line.
+
+$$
+m=\max(2,\lfloor n_{\min}/2\rfloor),\quad |L_i|,|R_i|\ge m,\quad\sigma_i=\max(s_L,s_R,a/q),\quad A_i=\{|p_R-p_L|\le\max(a,v\sigma_i)\},\quad b_i^{\rm support}=(p_L+p_R)/2,\quad B_i^{\rm support}=\max(a,q\sigma_i)
+$$
+
+### 4 · Maximum deviation from reliable support trend
+
+The shape-aware centered support trend uses future trades: even with causal_ewma, final optional-policy decisions are retrospective. Let u = spread_units_per_bp, so a 10 bp cutoff is 10 × u in the input's numeric units. Exclude any trade with reliable support and distance strictly above max_deviation_bps, regardless of Quantity or the method's uncertainty. Exactly 10 bp does not trigger this rule; a small source-precision roundoff allowance prevents numerical fitting error from reversing equality. Missing, disagreeing, protected-transition or one-sided support cannot trigger the hard cap. The displayed method's statistical band and optional support-trend distance boundaries are separate diagnostics; original spreads and algorithm results are preserved.
+
+$$
+d_i^{\rm bp}=|y_i-b_i^{\rm support}|/u,\quad E_i^{\max}=\text{reliable support}_i\land(d_i^{\rm bp}>D),\quad D=10\text{ by default}
+$$
+
+### 5 · Decision precedence and honest coverage
+
+Invalid inputs, outside-session records and solver failures stay excluded. Reliable maximum-deviation exclusions take precedence over Quantity retention. Otherwise preserve strong algorithm decisions, then apply Quantity decisions only to weak evidence. Policy exclusions have zero fitting weight. Retained uncertain records are fit-eligible by the explicitly chosen policy and have weight 1, but remain unassessed in algorithm-coverage statistics. Review the separate jf_algorithm_* snapshots, jf_policy_reason, support reliability, normalized Quantity and retained-uncertain counts before using the selected sample.
+
+$$
+E_i^{\max}\Rightarrow\text{policy exclusion},\quad E_i^Q\Rightarrow\text{policy exclusion},\quad R_i^Q\land\neg E_i^{\max}\Rightarrow\text{retained uncertain},\quad\text{coverage}=N_{\rm algorithm\ assessed}/N_{\rm supplied}
 $$

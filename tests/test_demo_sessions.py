@@ -19,6 +19,17 @@ def test_demo_scenario_count_and_seed_reproduction():
     assert frame.attrs["simulation"]["holidays"] == []
 
 
+def test_demo_quantity_is_independent_of_bad_trade_truth():
+    # TEST LOGIC: The public notebook exposes an arbitrary size column without making size an anomaly label.
+    frame = make_demo(42)
+    first = frame.loc[frame["CUSIP"].eq("DEMO00001")]
+    assert first["Quantity"].iloc[:8].tolist() == [100000, 500000, 1000000, 2000000, 5000000, 750000, 3000000, 100000]
+    assert frame.groupby("CUSIP")["Quantity"].nunique().eq(7).all()
+    assert first.loc[first["true_outlier"], "Quantity"].lt(1000000).any()
+    assert first.loc[first["true_outlier"], "Quantity"].ge(1000000).any()
+    assert first.loc[~first["true_outlier"], "Quantity"].eq(100000).any()
+
+
 # TEST LOGIC: all synthetic trades lie inside the declared weekday opening interval.
 def test_all_demo_timestamps_are_irregular_and_in_declared_sessions():
     frame = make_demo()

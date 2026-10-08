@@ -5,7 +5,7 @@ from .config import FilterConfig, METHODS
 from .engine import filter_trades, summarize, select_fit_data
 from .demo import make_demo
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"
 __all__ = ["FilterConfig", "METHODS", "filter_trades", "summarize", "select_fit_data", "make_demo", "show_filter"]
 
 

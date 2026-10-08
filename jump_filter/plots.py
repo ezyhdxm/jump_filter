@@ -58,6 +58,23 @@ def _drawing_breaks(rows, max_gap):
     return breaks
 
 
+def _sampled_drawing_breaks(rows, positions, max_gap):
+    # Input: session breaks=[False,False,False,True,False,False],selected positions=[0,1,4,5].
+    # Output: closure prefix=[0,0,0,1,1,1],displayed breaks=[False,False,True,False].
+    # Trick: Prefix counts retain every original closure even when its boundary trade is omitted from the drawing population.
+    # CORE LOGIC: STEP 1 — Transfer actual path boundaries to displayed source positions.
+    closures = np.cumsum(_drawing_breaks(rows, max_gap))
+    breaks = np.r_[False, np.diff(closures[positions]) > 0] if len(positions) else np.array([], dtype=bool)
+    # Input: supported=[True,True,False,True,True,True],selected positions=[0,1,4,5],existing breaks=[False,False,False,False].
+    # Output: missing prefix=[0,0,1,1,1,1],displayed breaks=[False,False,True,False].
+    # Trick: A retained unsupported endpoint already becomes NaN; add a separator only when a hidden unsupported record lies between two supported displayed endpoints.
+    # CORE LOGIC: STEP 2 — Preserve omitted reference holes without duplicating visible NaN boundaries.
+    supported = np.isfinite(rows["jf_baseline"].to_numpy(dtype=float)) & np.isfinite(rows["jf_threshold"].to_numpy(dtype=float))
+    missing = np.cumsum(~supported)
+    breaks[1:] |= supported[positions[1:]] & supported[positions[:-1]] & (np.diff(missing[positions]) > 0)
+    return breaks
+
+
 def _band_coordinates(rows, max_gap, *, session_breaks=None):
     # Input: rows times=['2026-10-01T14:00Z','2026-10-02T14:00Z'],baseline=[100,101],threshold=[1,2],session_breaks=[False,True].
     # Output: times=[Oct1 14:00UTC,None,Oct2 14:00UTC], baseline=[100,NaN,101], upper=[101,NaN,103], lower=[99,NaN,99], cutoff=[1,NaN,2].
@@ -69,6 +86,12 @@ def _band_coordinates(rows, max_gap, *, session_breaks=None):
     timestamps = np.full(size, None, dtype=object)
     timestamps[positions] = rows["jf_time"].to_numpy(dtype=object)
     baseline, cutoff = rows["jf_baseline"].to_numpy(dtype=float), rows["jf_threshold"].to_numpy(dtype=float)
+    # Input: baseline=[100,101,NaN],cutoff=[1,NaN,1].
+    # Output: supported=[True,False,False],drawn baseline=[100,NaN,NaN],drawn cutoff=[1,NaN,NaN].
+    # Trick: This changes only chart coordinates; an incomplete reference must not create a baseline segment or a residual cutoff that contradicts its missing band.
+    # CORE LOGIC: STEP 2 — Align all rendered reference paths to their actual diagnostic support.
+    supported = np.isfinite(baseline) & np.isfinite(cutoff)
+    baseline, cutoff = np.where(supported, baseline, np.nan), np.where(supported, cutoff, np.nan)
     # PLOTTING LOGIC: Vectorized assignment avoids constructing a pandas Series for every displayed trade.
     coordinates = [timestamps]
     for values in (baseline, baseline + cutoff, baseline - cutoff, cutoff):
@@ -76,6 +99,47 @@ def _band_coordinates(rows, max_gap, *, session_breaks=None):
         drawn[positions] = values
         coordinates.append(drawn)
     return coordinates
+
+
+def _band_polygons(timestamps, upper, lower):
+    # Input: times=[Oct1 14:00UTC,Oct1 14:01UTC,None,Oct2 14:00UTC],upper=[101,102,NaN,103],lower=[99,100,NaN,101].
+    # Output: supported=[True,True,False,True],starts=[0,3],stops=[2,4].
+    # Trick: Finite band edges establish support; separators and unavailable references never acquire a synthetic zero-height band.
+    # CORE LOGIC: STEP 1 — Identify each contiguous supported run independently.
+    supported = np.isfinite(upper) & np.isfinite(lower)
+    starts = np.flatnonzero(supported & ~np.r_[False, supported[:-1]])
+    stops = np.flatnonzero(supported & ~np.r_[supported[1:], False]) + 1
+    # Input: times=[Oct1 14:00UTC,Oct1 14:01UTC],upper=[101,102],lower=[99,100],starts=[0],stops=[2].
+    # Output: x=[Oct1 14:00UTC,Oct1 14:01UTC,Oct1 14:01UTC,Oct1 14:00UTC,Oct1 14:00UTC,None],y=[101,102,100,99,101,None].
+    # Trick: Upper edges run forward and lower edges backward to enclose only that run; explicit closure plus null separators makes Plotly fill='toself' respect every gap. A singleton encloses zero area.
+    # CORE LOGIC: STEP 2 — Close separate band polygons without joining their endpoints.
+    polygon_time, polygon_values = [], []
+    for start, stop in zip(starts, stops):
+        section = timestamps[start:stop].tolist()
+        polygon_time.extend(section + section[::-1] + [section[0], None])
+        polygon_values.extend(upper[start:stop].tolist() + lower[start:stop][::-1].tolist() + [float(upper[start]), None])
+    return polygon_time, polygon_values
+
+
+def _policy_reference_rows(rows, config):
+    # Input: support trend=[1.00,1.01,1.02],reliable=[True,False,True],max_deviation_bps=10,spread_units_per_bp=.01.
+    # Output: supported=[True,False,True],raw-unit limit=.1.
+    # Trick: Spread labels do not convert values; the explicit units-per-bp configuration converts the policy limit, and unreliable trends never acquire a visual limit.
+    # CORE LOGIC: STEP 1 — Select reliable policy references and convert the optional distance limit.
+    trend = rows["jf_support_trend"].to_numpy(dtype=float)
+    reliable = rows.get("jf_support_reliable", pd.Series(False, index=rows.index)).fillna(False).to_numpy(dtype=bool)
+    supported = reliable & np.isfinite(trend)
+    raw_limit = float(config.get("max_deviation_bps", 10.)) * float(config.get("spread_units_per_bp", 1.))
+    # Input: times=[Oct1 14:00UTC,Oct1 14:01UTC,Oct1 14:02UTC],trend=[1.00,1.01,1.02],supported=[True,False,True],raw limit=.1,boundaries=[False,False,False].
+    # Output: drawing baseline=[1.00,NaN,1.02],drawing threshold=[.1,NaN,.1],times/boundaries unchanged.
+    # Trick: Construct only four drawing columns; full source annotations remain unchanged and source positional ordering survives duplicate index labels.
+    # CORE LOGIC: STEP 2 — Map policy support to the shared gap-preserving coordinate interface.
+    return pd.DataFrame({
+        "jf_time": rows["jf_time"].array,
+        "jf_baseline": np.where(supported, trend, np.nan),
+        "jf_threshold": np.where(supported, raw_limit, np.nan),
+        "jf_session_boundary": rows.get("jf_session_boundary", pd.Series(False, index=rows.index)).to_numpy(),
+    }, index=rows.index)
 
 
 def _extrema_positions(values, limit):
@@ -138,12 +202,17 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
     # PLOTTING LOGIC: The algorithm and statistics always use the full source; only the drawing population is reduced.
     total, total_flags = len(rows), int(rows["jf_is_outlier"].sum())
     positions = _display_positions(rows, value.to_numpy(dtype=float), max_points)
-    original_breaks = _drawing_breaks(rows, max_gap)
-    prefixes = np.cumsum(original_breaks)
-    displayed_breaks = np.r_[False, np.diff(prefixes[positions]) > 0] if len(positions) else np.array([], dtype=bool)
+    displayed_breaks = _sampled_drawing_breaks(rows, positions, max_gap)
+    # PLOTTING LOGIC: Policy references have their own reliable-support mask, so their omitted holes must be preserved before display sampling as well.
+    policy_config = annotated.attrs.get("jump_filter", {}).get("config", {})
+    policy_coordinates = None
+    if policy_config.get("max_deviation_rule") and "jf_support_trend" in rows:
+        policy_rows = _policy_reference_rows(rows, policy_config)
+        policy_breaks = _sampled_drawing_breaks(policy_rows, positions, max_gap)
+        policy_coordinates = _band_coordinates(policy_rows.iloc[positions], max_gap, session_breaks=policy_breaks)
     rows, value = rows.iloc[positions], value.iloc[positions]
     figure = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.14,
-                           row_heights=[.7, .3], subplot_titles=("Trades, baseline & cutoff band", "Deviation from baseline"))
+                           row_heights=[.7, .3], subplot_titles=("Trades, baseline & statistical cutoff band", "Deviation from baseline"))
     figure.update_layout(meta=dict(total_timed_trades=total, displayed_trades=len(rows),
                                    total_outliers=total_flags, displayed_outliers=int(rows["jf_is_outlier"].sum()),
                                    sampled=len(rows) < total, max_points=max_points))
@@ -168,11 +237,24 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
                   "<br>Active-clock gap %{customdata[8]} min · Wall-clock gap %{customdata[9]} min"
                   "<br>Session boundary %{customdata[10]} · Row position %{customdata[0]}"
                   "<br>%{customdata[3]}<extra></extra>")
+    # PLOTTING LOGIC: Policy evidence appears only when enabled; raw method diagnostics retain their own cutoff band and baseline.
+    if (policy_config.get("quantity_rule") or policy_config.get("max_deviation_rule")) and "jf_support_distance_bps" in rows:
+        hover = np.column_stack((hover,
+            rows.get("jf_quantity_notional", pd.Series(np.nan, index=rows.index)),
+            rows.get("jf_support_trend", pd.Series(np.nan, index=rows.index)),
+            rows["jf_support_distance_bps"],
+            rows.get("jf_support_reliable", pd.Series(False, index=rows.index)).astype(str),
+        ))
+        hover_text = hover_text.replace("<extra></extra>",
+            "<br>Quantity (notional) %{customdata[11]:,.0f}<br>Policy support trend %{customdata[12]:.4f} " + unit +
+            "<br>Distance to support %{customdata[13]:.3f} bp · Reliable support %{customdata[14]}<extra></extra>")
     evaluated = rows["jf_status"].isin(["ok", "outlier", "provisional_jump"])
     ambiguous = rows["jf_status"].eq("ambiguous_transition")
+    retained = rows["jf_status"].eq("retained_uncertain")
     classes = [
         ("Evaluated", ~rows["jf_is_outlier"] & evaluated, TEAL, "circle", 5.5),
-        ("Unscored", ~rows["jf_is_outlier"] & ~evaluated & ~ambiguous, MUTED, "circle-open", 7),
+        ("Unscored", ~rows["jf_is_outlier"] & ~evaluated & ~ambiguous & ~retained, MUTED, "circle-open", 7),
+        ("Retained · uncertain", retained & ~rows["jf_is_outlier"], AMBER, "circle-open", 7),
         ("Ambiguous turn", ambiguous, AMBER, "diamond-open", 9),
         ("Outlier", rows["jf_is_outlier"], RED, "x", 10),
     ]
@@ -181,17 +263,31 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
         figure.add_trace(go.Scattergl(x=rows.loc[mask, "jf_time"], y=value.loc[mask], mode="markers", name=label,
                                      marker=dict(color=color, size=size, symbol=symbol, opacity=.85), showlegend=bool(mask.any()),
                                      customdata=hover[mask.to_numpy()], hovertemplate=hover_text), row=1, col=1)
-    # PLOTTING LOGIC: The raw-unit cutoff band is diagnostic; line breaks preserve inactive sessions.
+    # PLOTTING LOGIC: Separate closed polygons preserve actual closures and unsupported-reference holes; tonexty can bridge interrupted traces.
     band_time, baseline, upper, lower, raw_cutoff = _band_coordinates(rows, max_gap, session_breaks=displayed_breaks)
-    figure.add_trace(go.Scatter(x=band_time, y=upper, mode="lines", line=dict(width=0),
-                               name="Cutoff band", showlegend=False, hoverinfo="skip", connectgaps=False), row=1, col=1)
-    figure.add_trace(go.Scatter(x=band_time, y=lower, mode="lines", line=dict(width=0),
-                               fill="tonexty", fillcolor="rgba(8,127,140,.075)", name="Cutoff band",
+    polygon_time, polygon_values = _band_polygons(band_time, upper, lower)
+    figure.add_trace(go.Scatter(x=polygon_time, y=polygon_values, mode="lines", line=dict(width=0),
+                               fill="toself", fillcolor="rgba(8,127,140,.075)", name="Cutoff band",
                                hoverinfo="skip", connectgaps=False), row=1, col=1)
     # PLOTTING LOGIC: Baselines are diagnostics rather than quoted executable mid prices.
     figure.add_trace(go.Scatter(x=band_time, y=baseline, mode="lines", name="Baseline",
                                line=dict(color=INK, width=1.8), connectgaps=False,
                                hovertemplate="%{x}<br>Baseline %{y:.4f} " + unit + "<extra></extra>"), row=1, col=1)
+    # PLOTTING LOGIC: The optional hard distance limit is distinct from the method's statistical band; unreliable support remains visibly interrupted.
+    if policy_coordinates is not None:
+        support_time, support_trend, support_upper, support_lower, _ = policy_coordinates
+        if np.isfinite(support_trend).any():
+            duplicate_baseline = list(support_time) == list(band_time) and np.array_equal(support_trend, baseline, equal_nan=True)
+            if not duplicate_baseline:
+                figure.add_trace(go.Scatter(x=support_time, y=support_trend, mode="lines", name="Support trend",
+                    line=dict(color=TEAL, width=1.5, dash="dash"), connectgaps=False,
+                    hovertemplate="%{x}<br>Policy support trend %{y:.4f} " + unit + "<extra></extra>"), row=1, col=1)
+            limit_label = f"{float(policy_config.get('max_deviation_bps', 10.)):g} bp limit"
+            for boundary, showlegend in [(support_upper, True), (support_lower, False)]:
+                figure.add_trace(go.Scatter(x=support_time, y=boundary, mode="lines", name=limit_label,
+                    legendgroup="policy-deviation-limit", showlegend=showlegend,
+                    line=dict(color=AMBER, width=1.1, dash="dash"), connectgaps=False,
+                    hovertemplate="%{x}<br>Policy support limit %{y:.4f} " + unit + "<extra></extra>"), row=1, col=1)
     regime = rows["jf_regime_change"].fillna(False)
     provisional = rows["jf_status"].eq("provisional_jump")
     for label, mask, symbol in [("Level change", regime & ~ambiguous, "diamond-open"),
@@ -201,8 +297,8 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
                                    customdata=hover[mask.to_numpy()], hovertemplate=hover_text), row=1, col=1)
     # PLOTTING LOGIC: The residual plot uses the engine's raw-unit diagnostic without recomputing it.
     figure.add_trace(go.Scattergl(x=rows["jf_time"], y=rows["jf_residual"], mode="markers", name="Residual", showlegend=False,
-                                 marker=dict(color=np.where(rows["jf_is_outlier"], RED, np.where(ambiguous, AMBER, np.where(evaluated, TEAL, MUTED))),
-                                             symbol=np.where(rows["jf_is_outlier"], "x", "circle"), size=np.where(rows["jf_is_outlier"], 8, 4.5), opacity=.85),
+                                 marker=dict(color=np.where(rows["jf_is_outlier"], RED, np.where(ambiguous | retained, AMBER, np.where(evaluated, TEAL, MUTED))),
+                                             symbol=np.where(rows["jf_is_outlier"], "x", np.where(retained, "circle-open", "circle")), size=np.where(rows["jf_is_outlier"], 8, 4.5), opacity=.85),
                                  customdata=hover, hovertemplate=hover_text.replace("Spread", "Residual")), row=2, col=1)
     figure.add_hline(y=0, line_color=MUTED, line_width=1, line_dash="dot", row=2, col=1)
     figure.add_trace(go.Scatter(x=band_time, y=raw_cutoff, mode="lines", showlegend=False,
@@ -240,7 +336,7 @@ def diagnostic_figure(annotated, *, spread_col="spread", unit="bp"):
     figure.add_trace(go.Bar(x=counts.values, y=[str(name).replace("_", " ") for name in counts.index], orientation="h", showlegend=False,
                            text=counts.values, textposition="outside", cliponaxis=False,
                            hovertemplate="%{y}<br>Trades %{x}<extra></extra>",
-                           marker_color=[RED if name == "outlier" else TEAL if name == "ok" else AMBER for name in counts.index]), row=1, col=2)
+                           marker_color=[RED if name in ("outlier", "policy_outlier") else TEAL if name == "ok" else AMBER for name in counts.index]), row=1, col=2)
     figure.update_layout(barmode="overlay")
     figure.update_xaxes(title_text=f"Residual · {unit}", row=1, col=1)
     figure.update_yaxes(title_text="Trades", row=1, col=1)

@@ -116,6 +116,15 @@ def _demo_arrivals(scenario, count, rng):
     return np.cumsum(increments), increments
 
 
+def _demo_quantity(positions):
+    # Input: positions=[0,1,2,3,4,5,6,7] ->
+    # Output: Quantity=[100000,500000,1000000,2000000,5000000,750000,3000000,100000].
+    # Trick: Size cycles independently of spread distortions; quantity is not an injected truth label.
+    # CORE LOGIC: STEP 1
+    sizes = np.array([100_000, 500_000, 1_000_000, 2_000_000, 5_000_000, 750_000, 3_000_000])
+    return sizes[np.asarray(positions) % len(sizes)]
+
+
 def make_demo(seed=42):
     """Eleven scenarios, 160 rows each, in bp; labels are synthetic truth only."""
     # CONFIGURATION LOGIC: reproducible generator and explicitly synthetic CUSIPs.
@@ -137,12 +146,13 @@ def make_demo(seed=42):
 
         # Input: scenario='turning_with_drop',positions=[79,80,81],anomaly=[0,0,0] ->
         # Output: true_outlier=[False,False,False],true_turning_point=[False,True,False],
-        # true_regime_change=[False,True,False].
+        # true_regime_change=[False,True,False],Quantity=[1000000,2000000,5000000].
         # Trick: true corners and lasting drops are legitimate construction events.
         # CORE LOGIC: STEP 2
         turning = (positions == 80) & (scenario in ("turning_point", "turning_with_drop"))
         regime = (positions == 80) & (scenario in ("level_shift", "turning_with_drop"))
         part = pd.DataFrame(dict(CUSIP=f"DEMO{bond + 1:05d}", time=times, spread=mid + noise + anomaly,
+                                 Quantity=_demo_quantity(positions),
                                  scenario=scenario, true_outlier=anomaly != 0, true_mid=mid,
                                  true_turning_point=turning, true_regime_change=regime,
                                  observation_noise_sigma=sigma, elapsed_trading_minutes=elapsed,

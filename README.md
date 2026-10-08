@@ -93,6 +93,17 @@ fit_data = select_fit_data(review, policy="hard")
 
 For BondCliQ, map `spread_col="BM_SPREAD"` when appropriate. If your `BM_SPREAD` is in percentage points, an `abs_floor` of `0.01` equals 1 bp. A display label does not convert data; convert percentage points to bp explicitly before using a 1-bp floor.
 
+## Optional fitting rules
+
+Both dashboards include an **Optional fitting rules** section. Each rule starts off, has a separate enable switch, and uses the same Apply/comparison/export workflow as the selected algorithm.
+
+- **Quantity-aware uncertainty:** choose any quantity column and its units. Original amounts use multiplier 1; the default small-trade boundary is strictly below 1,000,000. Small uncertain trades with independent suspicious evidence are rejected. Otherwise valid known-size uncertain trades are explicitly retained as `retained_uncertain`. Confirmed algorithm outliers remain excluded at every size. Missing quantity does not change the quantity decision.
+- **Maximum support-trend distance:** reject a trade more than 10 bp from a sufficiently supported, bracketed robust local trend, regardless of quantity. Configure the boundary through a slider or exact input. Set input spread units per bp explicitly: 1 for bp, 0.01 for percentage points, or 0.0001 for decimal rates. An unsupported trend cannot trigger this rule.
+
+The DataFrame API accepts `quantity_col="your_column"`. Enable rules using `FilterConfig(quantity_rule=True, quantity_threshold=1_000_000, quantity_multiplier=1, max_deviation_rule=True, max_deviation_bps=10, spread_units_per_bp=1)`. Omitting the switches preserves the original three-column behavior. The public notebook contains a synthetic `Quantity` column with both small and large trades.
+
+Original algorithm evidence, final fitting eligibility, uncertain retention, and rule-specific exclusions are reported separately. The optional centered support trend can use future observations even when the selected base method is causal EWMA. See [the exact rules, mathematical definitions, boundaries, and worked example](docs/OPTIONAL_RULES.md).
+
 ## Methods
 
 | Method | Local reference and flag rule | Future data |
@@ -140,9 +151,12 @@ All methods use a raw deviation boundary of at least `abs_floor`. Scores are sta
 | `jf_score`, `jf_threshold` | Absolute standardized score and raw-unit deviation cutoff |
 | `jf_n_reference`, `jf_regime_change` | Distinct-time support and persistent-level candidate |
 | `jf_weight`, `jf_row_id`, `jf_time`, `jf_method` | Suggested influence, source position, normalized UTC time, method |
-| `jf_fit_eligible` | Supported, accepted-record mask; use `select_fit_data` for a downstream fit |
+| `jf_fit_eligible` | Final hard-fitting decision; optional quantity rules can explicitly retain uncertain rows |
 | `jf_clock_time`, `jf_gap_minutes` | Selected-clock nanoseconds and gap from prior valid record, in minutes |
 | `jf_wall_gap_minutes`, `jf_session_boundary` | Original UTC gap and a crossed declared closure |
+| `jf_algorithm_*` | Original status, flag, reason, weight and eligibility when optional rules are enabled |
+| `jf_quantity_notional`, `jf_policy_*` | Normalized quantity and rule decisions when optional rules are enabled |
+| `jf_support_*` | Independent support trend, reliability, deviation, and bp distance for optional rules |
 | `jf_reference_span_minutes`, `jf_reference_density_per_hour` | Actual reference range and distinct-cohort count / hours; undefined spans stay missing |
 | `jf_n_votes`, `jf_n_scales` | Multiscale confirmations and evaluable scales |
 | `jf_solver_converged`, `jf_solver_iterations` | Huber-TV convergence state; nonconvergence abstains for the whole segment |

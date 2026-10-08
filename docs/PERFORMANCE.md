@@ -49,6 +49,18 @@ These are completed measurements of the guarded compiled implementation. First-p
 
 RSS is the **whole process high-water mark**, including imports, input, temporary arrays, annotated output, and preceding summary/repeat phases. It is neither incremental engine RAM nor a promise for the memory of a running notebook with other objects. macOS byte values and Linux KiB values are converted to MiB; the benchmark reports null when that measurement is unavailable on Windows. Upload parsing, chart construction, browser rendering, notebook startup, and file export are excluded from filter timings.
 
+### Optional Quantity and support-trend rules
+
+Version 0.4.0 was also measured on the balanced **1,001,000-row / 13,000-CUSIP** workload above, with a raw-amount Quantity column cycling through 500,000, 1,000,000 and 2,000,000 by source position. The method was `local_linear`, the clock was trading time, and all other algorithm settings used `FilterConfig` defaults. Both optional rules used their default 1,000,000 notional cutoff and 10 bp distance cap; spreads were already in bp. Numerical kernels were warmed on 13,013 source rows before measurement.
+
+| Warm engine call | Wall time | Final flags | Fit-eligible trades |
+|---|---:|---:|---:|
+| Robust local linear, optional rules off | 7.521 s | 32,408 | 968,592 |
+| Robust local linear, both rules on, first trial | 18.099 s | 32,841 | 968,159 |
+| Robust local linear, both rules on, second trial | 17.323 s | 32,841 | 968,159 |
+
+The independent left/right support fits and additional row-level audit columns add work and memory. Whole-process peak RSS across this measurement process was **1.87 GiB**, including its warm-up and all three trials. These timings exclude workload generation, summary calculation, file export, notebook communication and chart rendering. They establish completed engine runs on this machine; the synthetic flag counts do not validate trade-screening accuracy on private data. Both rules remain off by default, and selected-bond review continues to avoid filtering the full universe on each interaction.
+
 ### Why the earlier dashboard felt slow
 
 Measured pre-optimization timings on the same generator and environment were:

@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import pandas as pd
 from jump_filter import METHODS, FilterConfig, filter_trades, select_fit_data
-from jump_filter.explanations import METHOD_EXPLANATIONS, PARAMETER_HELP, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, math_display_blocks
+from jump_filter.explanations import METHOD_EXPLANATIONS, PARAMETER_HELP, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, POLICY_STEPS, math_display_blocks
 from jump_filter.dashboard import fitting_statistics
 
 # TEST LOGIC: Locate the application from this test rather than the shell working directory.
@@ -28,7 +28,7 @@ def test_method_cards_cover_implemented_methods_and_relevant_controls():
 def test_math_pane_layout_preserves_equations_and_splits_independent_clauses():
     # TEST LOGIC: Layout-only changes retain mathematical tokens, source formulas, and case environments.
     import re
-    steps = COMMON_STEPS + CLOCK_STEPS + FITTING_STEPS + tuple(step for card in METHOD_EXPLANATIONS.values() for step in card["steps"])
+    steps = COMMON_STEPS + CLOCK_STEPS + FITTING_STEPS + POLICY_STEPS + tuple(step for card in METHOD_EXPLANATIONS.values() for step in card["steps"])
     def normalized(value):
         # TEST LOGIC: Remove only display alignment and spacing, comparing every original operator/name/number.
         value = value.replace(r"\begin{aligned}", "").replace(r"\end{aligned}", "").replace(r"\\&\qquad ", "").replace("&", "")

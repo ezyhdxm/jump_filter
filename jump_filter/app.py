@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 from jump_filter import FilterConfig, METHODS, make_demo
 from jump_filter.dashboard import ReviewWorkspace, evaluation_summary, method_comparison, audit_tables
-from jump_filter.explanations import METHOD_HELP, METHOD_EXPLANATIONS, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, PARAMETER_HELP, math_display_blocks
+from jump_filter.explanations import METHOD_HELP, METHOD_EXPLANATIONS, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, POLICY_STEPS, PARAMETER_HELP, math_display_blocks
 from jump_filter.plots import METHOD_LABELS, trade_figure, diagnostic_figure, comparison_figure
 
 # UI LOGIC: Native Streamlit controls remain keyboard accessible and use a compact research layout.
@@ -114,6 +114,8 @@ def _method_mathematics(method, pending_config, applied_method=None):
         _math_steps(CLOCK_STEPS)
     with st.expander("Downstream fitting · selection, influence and coverage"):
         _math_steps(FITTING_STEPS)
+    with st.expander("Optional screening · Quantity and reliable support trend"):
+        _math_steps(POLICY_STEPS)
     _section("Selected parameters", "These values follow your current controls; plots and exports follow the last successful Apply.")
     records = [(name, str(pending_config[name]), PARAMETER_HELP[name]) for name in card["parameters"]]
     records += [(name, str(pending_config[name]), explanation) for name, explanation in
@@ -123,6 +125,8 @@ def _method_mathematics(method, pending_config, applied_method=None):
                  ("session_timezone", "Market session timezone, configured separately from parsing naive input timestamps."),
                  ("session_open", "Regular weekday session opening time."), ("session_close", "Regular weekday session closing time."),
                  ("holidays", "Explicit full-day closures; supply session_schedule for a complete custom calendar.")]]
+    records += [(name, str(pending_config[name]), PARAMETER_HELP.get(name, "Enable this optional final selection rule")) for name in
+                ["quantity_rule", "quantity_threshold", "quantity_multiplier", "max_deviation_rule", "max_deviation_bps", "spread_units_per_bp"]]
     st.dataframe(pd.DataFrame(records, columns=["parameter", "pending value", "effect"]), width="stretch", hide_index=True)
     title, url = card["reference"]
     st.markdown(f"Reference: [{title}]({url})")
@@ -137,13 +141,14 @@ def _column_index(columns, aliases, fallback):
 def _metrics(rows):
     # UI LOGIC: Counts distinguish algorithm evaluation from missing inputs and limited support.
     stats = evaluation_summary(rows)
-    labels = [("Trades", f'{stats["total"]:,}'), ("Evaluated", f'{stats["evaluated"]:,}'),
-              ("Flagged", f'{stats["outliers"]:,}'),
-              ("Flag rate", f'{stats["flag_rate"]:.1%}' if np.isfinite(stats["flag_rate"]) else "—"),
+    labels = [("Trades", f'{stats["total"]:,}'), ("Algorithm assessed", f'{stats["evaluated"]:,}'),
+              ("Final outlier flags", f'{stats["outliers"]:,}'),
+              ("Assessed flag rate", f'{stats["flag_rate"]:.1%}' if np.isfinite(stats["flag_rate"]) else "—"),
               ("Low support", f'{stats["unsupported"]:,}'), ("Invalid", f'{stats["invalid"]:,}')]
     with st.container(key="jf-metrics"):
         for column, (label, value) in zip(st.columns(6), labels):
             column.metric(label, value)
+    st.caption(f'Final fit eligible: {stats["fit_eligible"]:,} · explicitly retained uncertain: {stats["retained_uncertain"]:,} · original algorithm flags: {stats["algorithm_outliers"]:,} · small suspicious exclusions: {stats["quantity_rejected"]:,} · support-trend cap exclusions: {stats["max_deviation_rejected"]:,}. Assessed flag rate excludes unassessed policy decisions.')
     return stats
 
 
@@ -160,6 +165,11 @@ def _table(frame, *, height="auto"):
               "jf_fit_eligible": "Fit eligible", "jf_row_id": "Source row", "jf_gap_minutes": "Active gap · min",
               "jf_wall_gap_minutes": "Wall gap · min", "jf_session_boundary": "Session boundary", "jf_scale": "Local scale",
               "jf_reference_density_per_hour": "References / hour", "jf_reference_span_minutes": "Reference span · min"}
+    labels.update(retained_uncertain="Retained uncertain", algorithm_outliers="Algorithm flags", quantity_rejected="Small suspicious exclusions",
+                  max_deviation_rejected="Trend-cap exclusions", jf_policy_reason="Policy decision", jf_algorithm_status="Algorithm status",
+                  jf_algorithm_reason="Algorithm reason", jf_algorithm_is_outlier="Algorithm outlier", jf_quantity="Normalized notional",
+                  jf_quantity_notional="Normalized notional", jf_quantity_valid="Valid Quantity", jf_support_trend="Independent support trend",
+                  jf_support_reliable="Reliable support", jf_support_residual="Support-trend residual", jf_support_distance_bps="Support distance · bp")
     config = {name: st.column_config.Column(labels.get(name, name.replace("_", " ").capitalize())) for name in frame.columns}
     for name in ["coverage", "flagged_rate", "flag_rate", "hard_retention"]:
         if name in frame:
@@ -175,6 +185,8 @@ def _downloads(review, selected):
     settings = dict(config=asdict(config), mapping=mapping, unit=review["unit"], rows=len(result), source_rows=len(review["data"]), review_scope=review["scope"],
                     selected_cusip=str(review["bond"]), source_fingerprint=review["source_id"], source="applied result",
                     calendar=result.attrs.get("jump_filter", {}).get("calendar"), chart_display=review.get("chart_metadata"))
+    if "jf_policy_reason" in result:
+        settings["optional_policy_counts"] = result["jf_policy_reason"].value_counts(dropna=False).to_dict()
     files = [("Annotated trades CSV", "annotated_trades.csv", "text/csv", lambda: result.to_csv(index=False).encode("utf-8")),
              ("Bond statistics CSV", "bond_summary.csv", "text/csv", lambda: review["summary"].to_csv(index=False).encode("utf-8")),
              ("Applied settings JSON", "settings.json", "application/json", lambda: json.dumps(settings, indent=2)),
@@ -232,9 +244,11 @@ def main():
         cusip_col = st.selectbox("CUSIP column", columns, index=_column_index(columns, ["CUSIP", "cusip", "bond_id"], 0), key=f"cusip_{mapping_key}")
         time_col = st.selectbox("Time column", columns, index=_column_index(columns, ["time", "timestamp", "trade_time"], 1), key=f"time_{mapping_key}")
         spread_col = st.selectbox("Spread column", columns, index=_column_index(columns, ["spread", "BM_SPREAD", "oas"], 2), key=f"spread_{mapping_key}")
+        quantity_choices = [None, *columns]
+        quantity_col = st.selectbox("Quantity column · optional", quantity_choices, format_func=lambda value: "Not mapped" if value is None else str(value), key=f"quantity_{mapping_key}")
         zone = st.text_input("Timezone for naive timestamps", "UTC", help="Aware timestamps retain their actual instant. Naive timestamps are interpreted in this timezone.")
         unit = st.text_input("Spread unit label", "bp", help="Display label only. Convert spreads upstream if needed; no automatic scaling.")
-    mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, timezone=zone)
+    mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, quantity_col=quantity_col, timezone=zone)
     # CACHEING LOGIC: Source and mapping identify a persistent bounded review cache and one positional CUSIP index.
     workspace_key = (source_id, tuple(mapping.items()))
     retained = st.session_state.get("jf_workspace")
@@ -285,6 +299,18 @@ def main():
         session_close = st.text_input("Weekday session closes", "18:30", disabled=regular_disabled)
         holidays_text = st.text_input("Closed dates · YYYY-MM-DD, ...", "", disabled=regular_disabled, help="Comma-separated full-session closures. A configured weekday schedule is a research assumption; holidays and early closes are not automatically inferred.")
         st.caption("Trading time removes scheduled overnight, weekend and explicit holiday closures. No-trade gaps during open sessions remain. Local trends use the selected clock; plots show actual UTC timestamps. Supply an authoritative session schedule for a custom calendar.")
+    # UI LOGIC: Optional policy edits share the same Apply snapshot as algorithm and calendar settings.
+    with st.sidebar.expander("Optional screening · Quantity and trend distance", expanded=False):
+        quantity_rule = st.checkbox("Enable Quantity-sensitive screening", value=False)
+        st.caption(f'Quantity mapping: {quantity_col if quantity_col is not None else "Not mapped — choose it under Column mappings and units"}.')
+        quantity_multiplier = st.selectbox("Quantity units", [1., 1000., 1000000.], format_func=lambda value: {1.: "Raw amount · 1MM = 1,000,000", 1000.: "Thousands · 1MM = 1,000", 1000000.: "Millions · 1MM = 1"}[value], disabled=not quantity_rule)
+        quantity_threshold = _parameter("quantity_threshold", "Small-trade threshold · notional amount", 1000000., 1., 10000000., 10000., disabled=not quantity_rule)
+        max_deviation_rule = st.checkbox("Enable maximum support-trend deviation", value=False)
+        max_deviation_bps = _parameter("max_deviation_bps", "Maximum trend deviation · bp", 10., .1, 100., .1, disabled=not max_deviation_rule)
+        spread_units_per_bp = st.selectbox("Spread numeric units", [1., .01, .0001], format_func=lambda value: {1.: "Basis points · 1 bp = 1", .01: "Percentage points · 1 bp = 0.01", .0001: "Decimal · 1 bp = 0.0001"}[value], disabled=not (quantity_rule or max_deviation_rule), help=PARAMETER_HELP["spread_units_per_bp"])
+        st.caption("Small Quantity alone does not exclude a trade. Weak evidence plus suspicious deviation can exclude a small trade; otherwise known positive Quantity retains it explicitly as uncertain. Confirmed algorithm outliers stay excluded at every size. Independent support prefers separate left/right trends; disagreement disables the cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. Units are explicit; the display label never converts values.")
+        if method == "causal_ewma" and (quantity_rule or max_deviation_rule):
+            st.caption("Optional screening uses centered future support, so final policy decisions are retrospective even when the original EWMA algorithm is causal.")
     # FILE IO LOGIC: Preserve the uploaded authoritative intervals and their identity with each successful review.
     session_schedule, schedule_error, schedule_id = None, None, None
     if use_schedule and time_basis == "trading":
@@ -299,7 +325,9 @@ def main():
                 schedule_error = f"Could not read session schedule CSV: {exc}"
     pending_config = dict(method=method, horizon=horizon, max_gap=max_gap, time_basis=time_basis,
                           session_timezone=session_timezone, session_open=session_open, session_close=session_close,
-                          holidays=tuple(value.strip() for value in holidays_text.split(",") if value.strip()), **config_values)
+                          holidays=tuple(value.strip() for value in holidays_text.split(",") if value.strip()),
+                          quantity_rule=quantity_rule, quantity_threshold=quantity_threshold, quantity_multiplier=quantity_multiplier,
+                          max_deviation_rule=max_deviation_rule, max_deviation_bps=max_deviation_bps, spread_units_per_bp=spread_units_per_bp, **config_values)
     with st.sidebar.container(key="jf-apply"):
         applied = st.button("Apply filter", type="primary", width="stretch")
         st.caption("Edits stay pending until you apply. Exports retain the applied settings.")
@@ -384,12 +412,13 @@ def main():
         figure = cached_chart[1]
         review["chart_metadata"] = figure.layout.meta
         st.plotly_chart(figure, width="stretch")
-        st.caption("Hover a trade for its reason, score and local support. Red crosses mark outliers; amber symbols mark transitions. Original spreads are preserved.")
+        st.caption("Red crosses mark final outlier exclusions, including optional policies. Gray open circles are unscored; amber open circles are explicitly retained uncertain and fit eligible; amber open diamonds mark unresolved transitions. Hover for exact evidence and reasons. Original spreads are preserved.")
         if figure.layout.meta.get("sampled"):
             counts = figure.layout.meta
             st.caption(f'Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports use every reviewed trade.')
         with st.expander("How to read this review"):
-            st.write("The shaded band is the method's deviation cutoff around its diagnostic baseline. Empty markers are unscored records or ambiguous transitions; they are not automatically eligible for fitting. Session boundaries break the reference path.")
+            st.write("The shaded band is the method's statistical deviation cutoff around its diagnostic baseline. When enabled, dashed outlines show the separate support-trend distance cap, default ±10 bp. Session boundaries, configured gap breaks and missing usable references interrupt the paths and shading. These bands are screening cutoffs, not confidence intervals.")
+            st.write("Gray open circles are unscored and not fit eligible by default; amber open diamonds are unresolved transitions. Amber open circles are explicitly retained uncertain by the Quantity policy and are fit eligible. Their inclusion is a selection decision, not certification that the trade is clean.")
             st.write("Historical screening can use future trades. CUSIP, time and spread identify statistical deviations; they cannot establish retail origin, distress, markup or commission. The baseline is a diagnostic reference, not an observed market mid.")
     with math_tab:
         _method_mathematics(method, pending_config, review["config"].method)
@@ -402,7 +431,7 @@ def main():
             _table(summary)
         _section("Fitting coverage and retention")
         _table(review["fitting"])
-        st.caption("Hard fit uses jf_fit_eligible (status ok and unflagged). Soft fit uses positive weights among status ok/outlier. Ambiguous transitions, provisional, invalid, unsupported and solver-failure records are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size or inverse variance.")
+        st.caption("Hard fit uses final jf_fit_eligible. Optional Quantity screening can explicitly retain uncertain records; they remain unassessed in algorithm coverage. Soft fit uses positive weights among ok, original outlier and retained-uncertain records. Optional policy exclusions have zero weight. Invalid, outside-session and solver-failure rows remain excluded. Weight sum is neither effective sample size nor inverse variance.")
         # CACHEING LOGIC: Keep only the current bond's diagnostic figure, rather than a chart for every source CUSIP.
         cached_diagnostic = review.get("diagnostic_chart")
         if cached_diagnostic is None or cached_diagnostic[0] != selected_value:
@@ -417,6 +446,9 @@ def main():
         with reasons:
             _section("Flag and support reasons")
             _table(audits["reasons"])
+        if "policy_reasons" in audits:
+            _section("Optional policy decisions", "Final selection reasons are separate from the preserved algorithm status and reason.")
+            _table(audits["policy_reasons"])
         st.caption("Flag rate uses evaluated records. Invalid and insufficient-history records remain in the audit table and exports.")
         support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
                            "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
@@ -446,10 +478,13 @@ def main():
         flagged_only = st.checkbox("Show flagged trades only", value=False)
         # UI LOGIC: This display-only option never changes the applied flag denominator or downloadable rows.
         shown = selected.loc[selected["jf_is_outlier"]] if flagged_only else selected
-        preferred = [active_cusip, applied_mapping["time_col"], active_spread, "jf_status", "jf_reason", "jf_score",
+        preferred = [active_cusip, applied_mapping["time_col"], active_spread, applied_mapping.get("quantity_col"), "jf_status", "jf_reason", "jf_policy_reason", "jf_score",
                      "jf_baseline", "jf_residual", "jf_threshold", "jf_n_reference", "jf_weight", "jf_fit_eligible",
                      "jf_n_votes", "jf_n_scales", "jf_solver_iterations", "jf_solver_converged",
                      "jf_reference_density_per_hour", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary", "jf_row_id"]
+        preferred += ["jf_algorithm_status", "jf_algorithm_reason", "jf_algorithm_is_outlier", "jf_quantity", "jf_quantity_notional", "jf_quantity_valid",
+                      "jf_support_trend", "jf_support_reliable", "jf_support_reason", "jf_support_residual", "jf_support_distance_bps",
+                      "jf_support_distance_tolerance_bps", "jf_policy_suspicious_source", "jf_policy_retained_uncertain"]
         _table(shown[[name for name in dict.fromkeys(preferred) if name in shown]].head(2000), height=440)
         if len(shown) > 2000:
             st.caption(f"Showing the first 2,000 of {len(shown):,} matching records. Download annotations for every reviewed row.")

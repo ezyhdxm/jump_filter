@@ -17,6 +17,7 @@ def main():
     parser.add_argument("--cusip-col", default="CUSIP")
     parser.add_argument("--time-col", default="time")
     parser.add_argument("--spread-col", default="spread")
+    parser.add_argument("--quantity-col", help="optional quantity mapping; enable rules in --config")
     parser.add_argument("--timezone", default="UTC")
     parser.add_argument("--method", choices=METHODS, default="consensus")
     parser.add_argument("--backend", choices=("auto", "python", "numba"), default="auto",
@@ -43,6 +44,7 @@ def main():
     # CORE LOGIC: STEP 1
     annotated = filter_trades(frame, FilterConfig(**options), cusip_col=arguments.cusip_col,
                               time_col=arguments.time_col, spread_col=arguments.spread_col,
+                              quantity_col=arguments.quantity_col,
                               timezone=arguments.timezone, session_schedule=schedule, backend=arguments.backend)
 
     # FILE IO LOGIC: serialize original-order annotations and optional per-bond counts.

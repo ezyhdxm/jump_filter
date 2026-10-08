@@ -769,11 +769,14 @@ def _group_gaps(result, group, utc_times):
     result["jf_session_boundary"][rows] = np.isfinite(wall_gaps) & (wall_gaps > selected_gaps + 1e-9)
 
 
-def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", session_schedule=None, backend="auto"):
+def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spread_col="spread", quantity_col=None, timezone="UTC", session_schedule=None, backend="auto"):
     """Return a copy with jf_* audit fields, preserving every source row and index.
 
     Naive timestamps use ``timezone``; numeric epochs and ambiguous DST times
     are invalid. No field is interpreted as a true mid or known transaction fee.
+    Optional rules preserve ``jf_algorithm_*`` evidence and publish separate
+    fitting decisions. Their support trend is retrospective, including when
+    the selected algorithm is causal; quantity units are explicitly configured.
     """
     # CONFIGURATION LOGIC: validate mappings, timezone and reserved output names.
     config = config or FilterConfig()
@@ -785,6 +788,10 @@ def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spr
     missing = set(mappings) - set(frame.columns)
     if missing:
         raise ValueError(f"missing columns: {sorted(missing)}")
+    if quantity_col is not None and (quantity_col not in frame.columns or quantity_col in mappings):
+        raise ValueError("quantity_col must name an existing column distinct from CUSIP, time and spread mappings")
+    if config.quantity_rule and quantity_col is None:
+        raise ValueError("quantity_rule requires quantity_col")
     if any(str(column).startswith("jf_") for column in frame.columns):
         raise ValueError("jf_ prefix is reserved; pass original source columns")
     ZoneInfo(timezone)
@@ -839,6 +846,15 @@ def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spr
     # CORE LOGIC: STEP 5
     result["jf_fit_eligible"] = (result["jf_status"] == "ok") & ~result["jf_is_outlier"]
 
+    # Input: status='insufficient_history',quantity=2000000,quantity_rule=True,
+    # no suspicious rejection -> Output: status='retained_uncertain',fit_eligible=True,
+    # algorithm_status='insufficient_history',algorithm_fit_eligible=False.
+    # Trick: disabled policies preserve the original audit columns and computation path.
+    # CORE LOGIC: STEP 6
+    if config.quantity_rule or config.max_deviation_rule:
+        from .policies import apply_policies
+        apply_policies(result, frame, data, utc_times, config, quantity_col, backend)
+
     # OUTPUT ASSEMBLY LOGIC: publish positional fields and reproducible metadata.
     output = frame.copy(deep=True)
     for name, values in result.items():
@@ -848,8 +864,13 @@ def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spr
     output.loc[~valid, "jf_clock_time"] = pd.NA
     output.attrs["jump_filter"] = dict(config=config.to_dict(), cusip_col=cusip_col,
                                       time_col=time_col, spread_col=spread_col, timezone=timezone,
-                                      future_observations=config.method != "causal_ewma", calendar=calendar,
+                                      future_observations=(config.method != "causal_ewma" or config.quantity_rule or config.max_deviation_rule), calendar=calendar,
                                       backend="numba" if accelerator is not None else "python")
+    if quantity_col is not None or config.quantity_rule or config.max_deviation_rule:
+        output.attrs["jump_filter"]["quantity_col"] = quantity_col
+    if config.quantity_rule or config.max_deviation_rule:
+        output.attrs["jump_filter"]["algorithm_future_observations"] = config.method != "causal_ewma"
+        output.attrs["jump_filter"]["support_method"] = "two_sided_piecewise_with_bracketed_linear_fallback"
     return output
 
 
@@ -857,23 +878,30 @@ def summarize(annotated, *, cusip_col="CUSIP"):
     """Counts cover every source row; flagged rate uses only evaluated rows."""
     # Input: A statuses=['ok','outlier','invalid_input'],flags=[False,True,False] ->
     # Output: _evaluated=[True,True,False],_invalid=[False,False,True],
-    # _insufficient=[False,False,False],_accepted=[True,False,False],one A group.
+    # _insufficient=[False,False,False],_accepted=[True,False,False].
     # Trick: insufficient_history/invalid_input stay outside the evaluated denominator.
     # CORE LOGIC: STEP 1
     data = annotated.copy()
-    data["_evaluated"] = data["jf_status"].isin(["ok", "outlier", "provisional_jump"])
-    data["_invalid"] = data["jf_status"].eq("invalid_input")
-    data["_insufficient"] = data["jf_status"].eq("insufficient_history")
+    status = data.get("jf_algorithm_status", data["jf_status"])
+    data["_evaluated"] = status.isin(["ok", "outlier", "provisional_jump"])
+    data["_invalid"] = status.eq("invalid_input")
+    data["_insufficient"] = status.eq("insufficient_history")
     data["_accepted"] = data["_evaluated"] & ~data["jf_is_outlier"]
+
+    # Input: statuses=['ok','outlier','invalid_input'],fit_eligible=[True,False,False]
+    # -> Output: _failed/_outside/_ambiguous all=[False,False,False]; one A group.
+    # Trick: fit eligibility follows the explicit final policy; evidence failure counts
+    # continue to follow the chosen algorithm's original status.
+    # CORE LOGIC: STEP 2
     data["_fit_eligible"] = data["jf_fit_eligible"]
-    data["_failed"] = data["jf_status"].eq("solver_not_converged")
-    data["_outside"] = data["jf_status"].eq("outside_session")
-    data["_ambiguous"] = data["jf_status"].eq("ambiguous_transition")
+    data["_failed"] = status.eq("solver_not_converged")
+    data["_outside"] = status.eq("outside_session")
+    data["_ambiguous"] = status.eq("ambiguous_transition")
     groups = data.groupby(cusip_col, dropna=False, sort=False)
 
     # Input: A rows=3,evaluated=2,flagged=1,accepted=1 ->
     # Output: flagged_rate=.5,coverage=2/3,accepted=1.
-    # CORE LOGIC: STEP 2
+    # CORE LOGIC: STEP 3
     summary = groups.agg(rows=("jf_row_id", "size"), evaluated=("_evaluated", "sum"),
                          flagged=("jf_is_outlier", "sum"), accepted=("_accepted", "sum"),
                          invalid=("_invalid", "sum"), insufficient=("_insufficient", "sum"),
@@ -883,6 +911,21 @@ def summarize(annotated, *, cusip_col="CUSIP"):
                          median_reference_count=("jf_n_reference", "median"))
     summary["flagged_rate"] = summary["flagged"].div(summary["evaluated"].replace(0, np.nan))
     summary["coverage"] = summary["evaluated"].div(summary["rows"])
+
+    # Input: algorithm states=['ok','insufficient_history'],final flags=[False,True],
+    # quantity_rejected=[False,True] -> Output: evaluated=1,flagged=1,
+    # flagged_rate=0,quantity_rejected=1,coverage=.5 (uncertain rejection is separate).
+    # Trick: policy decisions do not turn an algorithm's abstentions into assessed evidence.
+    # CORE LOGIC: STEP 4
+    if "jf_algorithm_status" in data:
+        data["_flagged_evaluated"] = data["jf_is_outlier"] & data["_evaluated"]
+        extra = groups.agg(algorithm_flagged=("jf_algorithm_is_outlier", "sum"),
+                           retained_uncertain=("jf_policy_retained_uncertain", "sum"),
+                           quantity_rejected=("jf_policy_quantity_rejected", "sum"),
+                           max_deviation_rejected=("jf_policy_max_deviation", "sum"),
+                           flagged_evaluated=("_flagged_evaluated", "sum"))
+        summary = summary.join(extra)
+        summary["flagged_rate"] = summary["flagged_evaluated"].div(summary["evaluated"].replace(0, np.nan))
     return summary.reset_index()
 
 
@@ -892,6 +935,8 @@ def select_fit_data(annotated, *, policy="hard", include_provisional=False):
     Hard exclusion uses accepted rows. Soft screening also keeps evaluable
     anomalies with bounded influence weights. These weights are not inverse
     variances and do not solve identification of the economic mid.
+    An enabled quantity rule can explicitly retain uncertain rows in both
+    modes; mandatory policy outliers remain excluded in both modes.
     """
     # CONFIGURATION LOGIC: require engine annotations and an explicit downstream policy.
     if policy not in ("hard", "soft"):
@@ -904,7 +949,7 @@ def select_fit_data(annotated, *, policy="hard", include_provisional=False):
     # fitting weights=[1,.15]. With policy=hard -> selected=[True,False,False],weights=[1].
     # Trick: future-dependent filtering is suitable for historical estimation; causal provisional jumps stay excluded by default.
     # CORE LOGIC: STEP 1
-    states = ["ok", "outlier"] + (["provisional_jump"] if include_provisional else [])
+    states = ["ok", "outlier", "retained_uncertain"] + (["provisional_jump"] if include_provisional else [])
     mask = annotated["jf_fit_eligible"] if policy == "hard" else annotated["jf_status"].isin(states) & annotated["jf_weight"].gt(0)
     selected = annotated.loc[mask].copy()
     selected["jf_fit_weight"] = 1.0 if policy == "hard" else selected["jf_weight"]
