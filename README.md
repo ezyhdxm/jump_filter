@@ -38,6 +38,8 @@ If you already have a notebook environment, run `%pip install -e '.[dashboard,sp
 
 Reopen the notebook and run all cells when starting a new session; live controls depend on a running kernel. Full standalone HTML charts remain available through Export for viewing without a kernel.
 
+Notebook sections replace one complete output snapshot when a review changes. Repeated Apply, bond navigation, and comparison refreshes keep one chart in each section. A bare `show_filter(data).run()` displays the dashboard once in its cell; the returned panel can still be displayed from a later cell. After upgrading from an earlier version, restart the kernel and rerun the dashboard cell to replace existing widget models.
+
 The fresh-install browser check used Python 3.13, Notebook 7.6.3, JupyterLab 4.6.4, ipykernel 7.4.0, ipywidgets 8.1.9, anywidget 0.11.0 and Plotly 7.1.0. It verified bond/method selection, paired parameter controls, Apply, native charts, mathematical explanations and method comparison inside Notebook. The test suite also executes the supplied notebook in an actual Jupyter kernel.
 
 ## Large portfolios

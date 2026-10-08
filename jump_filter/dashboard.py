@@ -276,6 +276,24 @@ def _notebook_figure(figure):
     return widget
 
 
+def _replace_outputs(output, *objects):
+    """Replace a notebook section without capturing the kernel's display stream."""
+    # UI LOGIC: Format native HTML, mathematics and widget references before publishing one complete section.
+    # Input: prior outputs=[HTML('old')], objects=[HTML('<b>new</b>'), FigureWidget(model_id='abc')].
+    # Output: exactly two display_data records: text/html='<b>new</b>' and widget-view model_id='abc'; msg_id=''.
+    # Trick: Assigning the tuple replaces old records. Empty msg_id disables IOPub capture, so concurrent frontend views cannot echo displays into this section.
+    from IPython.core.interactiveshell import InteractiveShell
+    formatter = InteractiveShell.instance().display_formatter.format
+    records = []
+    for obj in objects:
+        data, metadata = formatter(obj)
+        records.append(dict(output_type="display_data", data=data, metadata=metadata))
+    # UI LOGIC: Synchronize a single owned output snapshot; empty objects explicitly clears the section.
+    with output.hold_sync():
+        output.msg_id = ""
+        output.outputs = tuple(records)
+
+
 class FilterDashboard:
     """Live Jupyter widgets with an explicit applied result and bundled Plotly charts.
 
@@ -301,6 +319,7 @@ class FilterDashboard:
         self.applied_schedule = None
         self.comparison, self._applied_state, self.busy = None, None, False
         self._figure_widgets, self._comparison_widget = (), None
+        self._displayed_request = None
         self._explanation_widgets = ()
         self._statistics_widgets = ()
         # VALIDATION LOGIC: Fail early for a bad mapping, before showing controls that cannot run.
@@ -414,13 +433,12 @@ class FilterDashboard:
 
     def _empty_outputs(self):
         # UI LOGIC: The first view explains the next action and gives each empty results tab a useful purpose.
-        from IPython.display import HTML, display
+        from IPython.display import HTML
         prompts = [(self.chart, "Ready to review", "Choose a bond and method, then Apply filter to see trades and outlier flags."),
                    (self.statistics, "Statistics follow your applied review", "Coverage, fitting retention and liquidity diagnostics will appear here."),
                    (self.method_output, "Compare detection methods", "Apply a filter, then Compare methods to inspect sensitivity on the selected bond.")]
         for output, title, message in prompts:
-            with output:
-                display(HTML(f'<div class="jf-empty"><strong>{escape(title)}</strong>{escape(message)}</div>'))
+            _replace_outputs(output, HTML(f'<div class="jf-empty"><strong>{escape(title)}</strong>{escape(message)}</div>'))
 
     def _state(self):
         # UI LOGIC: Only algorithm settings determine pending state; view focus and export path do not.
@@ -452,7 +470,7 @@ class FilterDashboard:
 
     def _render_explanation(self):
         # UI LOGIC: Group native mathematics into progressive sections without removing any formula or example.
-        from IPython.display import HTML, Math, display
+        from IPython.display import HTML, Math
         card = METHOD_EXPLANATIONS[self.method.value]
         applied = self.applied_config.method if self.applied_config else "none yet"
         groups = [("Detection method · equations and worked example", card["steps"]),
@@ -462,16 +480,16 @@ class FilterDashboard:
         sections = []
         for index, (_, steps) in enumerate(groups):
             section = self.w.Output(layout=self.w.Layout(width="100%")).add_class("jf-math-section")
-            with section:
-                for title, prose, formula in steps:
-                    display(HTML(f'<h4>{escape(title)}</h4><p>{escape(prose)}</p>'))
-                    for block in math_display_blocks(formula):
-                        display(Math(block))
-                if index == 0:
-                    title, url = card["reference"]
-                    display(HTML(f'<div class="jf-example"><h4>Worked numerical example</h4><p>{escape(card["example"])}</p></div>'
-                                 f'<h4>Assumptions and limitations</h4><p>{escape(card["tradeoffs"])}</p>'
-                                 f'<p class="jf-help">Reference: <a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{escape(title)}</a></p>'))
+            contents = []
+            for title, prose, formula in steps:
+                contents.append(HTML(f'<h4>{escape(title)}</h4><p>{escape(prose)}</p>'))
+                contents.extend(Math(block) for block in math_display_blocks(formula))
+            if index == 0:
+                title, url = card["reference"]
+                contents.append(HTML(f'<div class="jf-example"><h4>Worked numerical example</h4><p>{escape(card["example"])}</p></div>'
+                                     f'<h4>Assumptions and limitations</h4><p>{escape(card["tradeoffs"])}</p>'
+                                     f'<p class="jf-help">Reference: <a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">{escape(title)}</a></p>'))
+            _replace_outputs(section, *contents)
             sections.append(section)
         # UI LOGIC: The parameter audit follows the current selection; charts and exports keep their applied snapshot.
         parameters = self.w.Output(layout=self.w.Layout(width="100%")).add_class("jf-math-section")
@@ -483,19 +501,18 @@ class FilterDashboard:
                  ("session_open", self.session_open.value, "Weekday regular open"),
                  ("session_close", self.session_close.value, "Weekday regular close"),
                  ("holidays", self.holidays.value, "Explicit full-day closures")]
-        with parameters:
-            display(HTML(_table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"]))))
-            if self.session_schedule is not None:
-                display(HTML('<p class="jf-help">An authoritative session_schedule was supplied; trading mode uses only its intervals and overrides weekday calendar controls.</p>' + _table_html(self.session_schedule)))
+        contents = [HTML(_table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"])))]
+        if self.session_schedule is not None:
+            contents.append(HTML('<p class="jf-help">An authoritative session_schedule was supplied; trading mode uses only its intervals and overrides weekday calendar controls.</p>' + _table_html(self.session_schedule)))
+        _replace_outputs(parameters, *contents)
         sections.append(parameters)
         accordion = self.w.Accordion(children=sections, selected_index=0)
         for index, (title, _) in enumerate(groups):
             accordion.set_title(index, title)
         accordion.set_title(4, "Selected parameter values · complete audit")
-        with self.explanation:
-            self.explanation.clear_output(wait=True)
-            display(HTML(f'<h3>{escape(card["name"])}</h3><p class="jf-help">{escape(card["mode"])} · Explanation: selected method {escape(self.method.value)} · Applied plots/exports: {escape(applied)}</p><p>{escape(card["summary"])}</p>'))
-            display(accordion)
+        _replace_outputs(self.explanation,
+                         HTML(f'<h3>{escape(card["name"])}</h3><p class="jf-help">{escape(card["mode"])} · Explanation: selected method {escape(self.method.value)} · Applied plots/exports: {escape(applied)}</p><p>{escape(card["summary"])}</p>'),
+                         accordion)
         # UI LOGIC: Release superseded widget models after replacing their views, avoiding stale math/control audits.
         previous_widgets = self._explanation_widgets
         self._explanation_widgets = (*sections, accordion)
@@ -544,16 +561,14 @@ class FilterDashboard:
 
     def _publish(self, selected, figure, diagnostic, summary, fitting):
         # UI LOGIC: Replace output areas only after engine and plot construction both succeed.
-        from IPython.display import HTML, display
+        from IPython.display import HTML
         self.kpis.value = f'<p class="jf-help">Headline counts · selected bond {escape(str(self.cusip.value))}. Statistics and annotated exports · {"all bonds" if self.applied_scope == "all" else "selected bond"}.</p>' + _kpi_html(evaluation_summary(selected))
-        with self.chart:
-            self.chart.clear_output(wait=True)
-            display(HTML('<div class="jf-section-heading"><h4>Spread history &amp; review flags</h4><span class="jf-help">Actual trade timestamps · UTC</span></div>'))
-            display(figure)
-            display(HTML('<p class="jf-help">Red crosses indicate statistical outliers; amber markers identify level changes or provisional jumps. Hover for scores, reference support and reasons.</p>'))
-            counts = figure.layout.meta or {}
-            if counts.get("sampled"):
-                display(HTML(f'<p class="jf-help">Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports retain every reviewed trade.</p>'))
+        contents = [HTML('<div class="jf-section-heading"><h4>Spread history &amp; review flags</h4><span class="jf-help">Actual trade timestamps · UTC</span></div>'),
+                    figure, HTML('<p class="jf-help">Red crosses indicate statistical outliers; amber markers identify level changes or provisional jumps. Hover for scores, reference support and reasons.</p>')]
+        counts = figure.layout.meta or {}
+        if counts.get("sampled"):
+            contents.append(HTML(f'<p class="jf-help">Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports retain every reviewed trade.</p>'))
+        _replace_outputs(self.chart, *contents)
         # UI LOGIC: Keep the liquidity chart immediately visible and progressively disclose the complete audit tables.
         audits = audit_tables(selected)
         support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
@@ -573,18 +588,15 @@ class FilterDashboard:
         sections = []
         for _, contents in groups:
             section = self.w.Output(layout=self.w.Layout(width="100%"))
-            with section:
-                display(HTML(contents))
+            _replace_outputs(section, HTML(contents))
             sections.append(section)
         accordion = self.w.Accordion(children=sections, selected_index=0)
         for index, (title, _) in enumerate(groups):
             accordion.set_title(index, title)
-        with self.statistics:
-            self.statistics.clear_output(wait=True)
-            display(HTML('<div class="jf-section-heading"><h4>Liquidity &amp; local uncertainty</h4><span class="jf-help">Selected bond · applied method</span></div>'))
-            display(diagnostic)
-            display(HTML('<p class="jf-help">Review support density and uncertainty before using flags for fitting. Expand a section below for exact counts and original-order trade diagnostics.</p>'))
-            display(accordion)
+        _replace_outputs(self.statistics,
+                         HTML('<div class="jf-section-heading"><h4>Liquidity &amp; local uncertainty</h4><span class="jf-help">Selected bond · applied method</span></div>'),
+                         diagnostic, HTML('<p class="jf-help">Review support density and uncertainty before using flags for fitting. Expand a section below for exact counts and original-order trade diagnostics.</p>'),
+                         accordion)
         # UI LOGIC: Keep expandable views alive while closing every superseded statistics widget.
         previous_statistics = self._statistics_widgets
         self._statistics_widgets = (*sections, accordion)
@@ -616,7 +628,7 @@ class FilterDashboard:
             self._applied_record = record
             self._view_bond = self.cusip.value
             self.applied_schedule = schedule
-            self.method_output.clear_output()
+            _replace_outputs(self.method_output)
             self._clear_comparison_widget()
             population = "All bonds (batch)" if self.applied_scope == "all" else f"Selected bond {self.cusip.value}"
             self.status.value = f'<div class="jf-status">{escape(population)} · applied {escape(config.method)} to {len(self.result):,} of {len(self.data):,} source rows. Exports contain this review population.</div>'
@@ -641,7 +653,7 @@ class FilterDashboard:
             population = "all bonds" if self.applied_scope == "all" else "selected bond"
             self.status.value = f'<div class="jf-status">Viewing {escape(str(self.cusip.value))} · applied {escape(self.applied_config.method)} · {population}: {len(self.result):,} of {len(self.data):,} source rows.</div>'
             self.comparison = None
-            self.method_output.clear_output()
+            _replace_outputs(self.method_output)
             self._clear_comparison_widget()
         except Exception as exc:
             # UI LOGIC: A failed bond visit restores the published focus so later exports still match visible charts.
@@ -660,7 +672,7 @@ class FilterDashboard:
 
     def compare(self, _=None):
         # UI LOGIC: Compare explicitly using the applied settings, even when new edits are pending.
-        from IPython.display import HTML, display
+        from IPython.display import HTML
         from .plots import comparison_figure
         if self.result is None or self.busy:
             self.status.value = '<div class="jf-status">Apply a filter before comparing methods.</div>'
@@ -669,11 +681,9 @@ class FilterDashboard:
         try:
             table = method_comparison(self.workspace.source_bond(self.cusip.value), self.applied_config, **self.mapping, session_schedule=self.applied_schedule)
             figure = _notebook_figure(comparison_figure(table))
-            with self.method_output:
-                self.method_output.clear_output(wait=True)
-                display(HTML('<p class="jf-help">Same selected bond, same applied hyperparameters. Differences measure sensitivity, not accuracy. Centered and causal methods use different information sets.</p>'))
-                display(figure)
-                display(HTML(_table_html(table)))
+            _replace_outputs(self.method_output,
+                             HTML('<p class="jf-help">Same selected bond, same applied hyperparameters. Differences measure sensitivity, not accuracy. Centered and causal methods use different information sets.</p>'),
+                             figure, HTML(_table_html(table)))
             self._clear_comparison_widget()
             self._comparison_widget = figure
             self.comparison = table
@@ -717,9 +727,19 @@ class FilterDashboard:
             return None
 
     def _ipython_display_(self):
-        # UI LOGIC: Displaying a workbench does not rerun filtering or change caller data.
+        # UI LOGIC: Show a single workbench view per notebook request; later cells can display it again.
+        # Input: current request='cell-1',last displayed='cell-1' -> Output: no additional view.
+        # Input: current request='cell-2',last displayed='cell-1' -> Output: one view,last displayed='cell-2'.
+        # Trick: show_filter displays immediately and also returns self; IPython automatically displays a final expression. Without this guard, a bare or chained call creates duplicate views.
+        from IPython import get_ipython
         from IPython.display import display
+        kernel = getattr(get_ipython(), "kernel", None)
+        parent = kernel.get_parent() if kernel is not None else {}
+        request = parent.get("header", {}).get("msg_id")
+        if request is not None and request == self._displayed_request:
+            return
         display(self.widget)
+        self._displayed_request = request
 
 
 def show_filter(data, **kwargs):
@@ -729,7 +749,6 @@ def show_filter(data, **kwargs):
     explanations, mathematical formulas, statistics and applied-data exports.
     """
     # UI LOGIC: Return the workbench so callers can inspect its applied result and exports.
-    from IPython.display import display
     panel = FilterDashboard(data, **kwargs)
-    display(panel.widget)
+    panel._ipython_display_()
     return panel
