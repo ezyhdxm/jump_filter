@@ -10,7 +10,7 @@ go = pytest.importorskip("plotly.graph_objects")
 from ipywidgets.widgets.widget import _remove_buffers
 from jump_filter import FilterConfig, filter_trades
 from jump_filter.dashboard import _notebook_figure
-from jump_filter.plots import comparison_figure, trade_figure
+from jump_filter.plots import comparison_figure, diagnostic_figure, trade_figure
 
 
 def test_native_figure_comm_encodes_missing_hover_values_as_null():
@@ -41,9 +41,92 @@ def test_unscored_bond_chart_remains_json_compliant_and_preserves_nan_annotation
         json.dumps(state, allow_nan=False)
         unscored = next(trace for trace in widget.data if trace.name == "Unscored")
         assert len(unscored.x) == 4
+        assert all(isinstance(value, str) for value in unscored.x)
+        assert pd.to_datetime(unscored.x, utc=True).tolist() == frame["time"].tolist()
         assert all(row[4] is None for row in unscored.customdata)
         assert annotated["jf_score"].isna().all()
         assert annotated["jf_status"].eq("insufficient_history").all()
+    finally:
+        widget.close()
+
+
+def test_native_datetime_array_preserves_missing_coordinate_gaps_and_binary_nan_values():
+    # TEST LOGIC: pandas 3 can expose nanosecond datetime arrays; native .tolist() would emit oversized integer coordinates.
+    times = np.array(["2026-10-01T14:00:00", "NaT", "2026-10-02T14:00:00"], dtype="datetime64[ns]")
+    values = np.array([100., np.nan, 101.])
+    source = go.Figure(go.Scatter(x=times, y=values, connectgaps=False))
+    widget = _notebook_figure(source)
+    try:
+        assert list(widget.data[0].x) == ["2026-10-01T14:00:00.000000000", None, "2026-10-02T14:00:00.000000000"]
+        assert isinstance(widget.data[0].y, np.ndarray)
+        np.testing.assert_equal(widget.data[0].y, values)
+        assert np.isnat(source.data[0].x[1])
+        assert not widget.data[0].connectgaps
+        state, paths, buffers = _remove_buffers(widget.get_state())
+        json.dumps(state, allow_nan=False)
+        assert paths and buffers
+    finally:
+        widget.close()
+
+
+def _typed_row_deltas(matrix):
+    # TEST LOGIC: Plotly's frontend reports typed matrix rows as descriptors; its Python decoder leaves these as dictionaries.
+    # Input: float64 matrix [[10., 11.], [20., 21.]].
+    # Output: two row descriptors, each dtype='float64', shape=[2], and a buffer containing the corresponding two values.
+    return [dict(dtype=str(row.dtype), shape=[len(row)], value=memoryview(np.ascontiguousarray(row)))
+            for row in matrix]
+
+
+def test_native_numeric_matrix_accepts_frontend_trace_deltas_without_type_conflict():
+    # TEST LOGIC: The JSON roundtrip changed the original customdata into a bdata dictionary and raised AssertionError here.
+    matrix = np.array([[10., 11.], [20., 21.]])
+    source = go.Figure(go.Bar(x=[1, 2], y=[3., 4.], customdata=matrix))
+    # TEST LOGIC: The legacy JSON representation becomes typed frontend rows, whose returned descriptors trigger the observed assertion.
+    legacy = go.FigureWidget(json.loads(source.to_json(remove_uids=False)))
+    try:
+        if isinstance(legacy.data[0].customdata, dict):
+            legacy_message = dict(trace_deltas=[dict(uid=legacy.data[0].uid, customdata=_typed_row_deltas(matrix))],
+                                  trace_edit_id=legacy._last_trace_edit_id)
+            with pytest.raises(AssertionError):
+                legacy._js2py_traceDeltas = legacy_message
+    finally:
+        legacy.close()
+    widget = _notebook_figure(source)
+    try:
+        trace = widget.data[0]
+        assert isinstance(trace.customdata, np.ndarray)
+        assert trace.customdata.shape == (2, 2)
+        # TEST LOGIC: Native matrix transport sends ordinary nested lists, so frontend deltas preserve that same representation.
+        message = dict(trace_deltas=[dict(uid=trace.uid, customdata=matrix.tolist())],
+                       trace_edit_id=widget._last_trace_edit_id)
+        widget._js2py_traceDeltas = message
+        assert widget._js2py_traceDeltas is None
+        np.testing.assert_equal(trace.customdata, matrix)
+        np.testing.assert_equal(source.data[0].customdata, matrix)
+        state, _, _ = _remove_buffers(widget.get_state())
+        json.dumps(state, allow_nan=False)
+    finally:
+        widget.close()
+
+
+def test_diagnostic_histogram_accepts_frontend_matrix_deltas_and_keeps_binary_coordinates():
+    # TEST LOGIC: Applying the filter/CUSIP callback renders these real histogram matrices even when Statistics is hidden.
+    annotated = pd.DataFrame(dict(jf_residual=[0., 1., 20.], jf_is_outlier=[False, False, True],
+                                  jf_status=["ok", "ok", "outlier"]))
+    source = diagnostic_figure(annotated)
+    widget = _notebook_figure(source)
+    try:
+        trace = widget.data[0]
+        assert isinstance(trace.x, np.ndarray)
+        assert isinstance(trace.customdata, np.ndarray)
+        matrix = np.asarray(source.data[0].customdata)
+        widget._js2py_traceDeltas = dict(trace_deltas=[dict(uid=trace.uid, customdata=matrix.tolist())],
+                                        trace_edit_id=widget._last_trace_edit_id)
+        np.testing.assert_equal(trace.customdata, matrix)
+        assert sum(widget.data[0].y) + sum(widget.data[1].y) == 3
+        state, paths, buffers = _remove_buffers(widget.get_state())
+        json.dumps(state, allow_nan=False)
+        assert paths and buffers
     finally:
         widget.close()
 

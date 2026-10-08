@@ -40,6 +40,8 @@ Reopen the notebook and run all cells when starting a new session; live controls
 
 Notebook sections replace one complete output snapshot when a review changes. Repeated Apply, bond navigation, and comparison refreshes keep one chart in each section. A bare `show_filter(data).run()` displays the dashboard once in its cell; the returned panel can still be displayed from a later cell. After upgrading from an earlier version, restart the kernel and rerun the dashboard cell to replace existing widget models.
 
+Version 0.4.1 fixes a Plotly `AssertionError` that can appear below the dashboard after Apply or CUSIP navigation. Live figures preserve native numerical arrays instead of reconstructing them from Plotly's encoded JSON representation; missing hover metadata still travels as JSON-safe nulls. Update the package in the active notebook environment, restart the kernel, clear old outputs and rerun the dashboard cell. Recreating the existing chart widgets is necessary for the fix to take effect.
+
 The fresh-install browser check used Python 3.13, Notebook 7.6.3, JupyterLab 4.6.4, ipykernel 7.4.0, ipywidgets 8.1.9, anywidget 0.11.0 and Plotly 7.1.0. It verified bond/method selection, paired parameter controls, Apply, native charts, mathematical explanations and method comparison inside Notebook. The test suite also executes the supplied notebook in an actual Jupyter kernel.
 
 ## Large portfolios

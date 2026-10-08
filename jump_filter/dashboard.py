@@ -293,12 +293,54 @@ def _kpi_html(stats):
             f'<p class="jf-help">Final fit eligible: {stats["fit_eligible"]:,} · explicitly retained uncertain: {stats["retained_uncertain"]:,} · original algorithm flags: {stats["algorithm_outliers"]:,} · small suspicious exclusions: {stats["quantity_rejected"]:,} · support-trend cap exclusions: {stats["max_deviation_rejected"]:,}. The assessed flag rate excludes unassessed policy decisions.</p>')
 
 
+def _widget_presentation_value(value):
+    """Normalize display metadata without replacing native numeric arrays with Plotly JSON dictionaries."""
+    # PLOTTING LOGIC: Preserve the numerical representation required by FigureWidget's two-way array protocol.
+    # Input: np.array([100., np.nan], dtype='float64'); np.array([[10., 11.], [20., 21.]]).
+    # Output: the same native arrays, preserving their shapes, values, and float64 dtypes.
+    # Trick: Supported one-dimensional numeric dtypes use binary buffers, where NaN is legal; finite matrices serialize as lists.
+    if isinstance(value, np.ndarray) and value.dtype.kind in "biuf":
+        if value.ndim == 1 or np.isfinite(value).all():
+            return value
+        # PLOTTING LOGIC: Numerical matrices containing missing hover metadata need explicit nulls in their list transport.
+        # Input: np.array([[np.nan, 0., 2.], [np.inf, 1., 2.]]) -> Output: object array [[None, 0., 2.], [None, 1., 2.]].
+        # Trick: An object copy preserves the source array and permits None without inventing numerical observations.
+        sanitized = value.astype(object)
+        sanitized[~np.isfinite(value)] = None
+        return sanitized
+    # PLOTTING LOGIC: Preserve missing date coordinates as real drawing gaps instead of integer nanoseconds or the text 'NaT'.
+    # Input: np.array(['2026-10-01T14:00:00', 'NaT'], dtype='datetime64[ns]').
+    # Output: ['2026-10-01T14:00:00.000000000', None].
+    # Trick: datetime64 contains no timezone; these chart arrays already represent the engine's UTC timestamps.
+    if isinstance(value, np.ndarray) and value.dtype.kind == "M":
+        timestamps = np.datetime_as_string(value).astype(object)
+        timestamps[np.isnat(value)] = None
+        return timestamps.tolist()
+    # PLOTTING LOGIC: Recurse through presentation containers before encoding leaves that cannot use binary transport.
+    # Input: {'marker': {'color': ['red', 'blue']}, 'customdata': [[np.nan, 1]]}.
+    # Output: {'marker': {'color': ['red', 'blue']}, 'customdata': [[None, 1]]}.
+    if isinstance(value, dict):
+        return {key: _widget_presentation_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_widget_presentation_value(item) for item in value]
+    # PLOTTING LOGIC: Plotly's public encoder converts dates to ISO strings and missing object metadata to JSON null.
+    # Input: datetime(2026, 10, 1, 14, 0, tzinfo=timezone.utc); object array [[np.nan, 1]].
+    # Output: '2026-10-01T14:00:00+00:00'; [[None, 1]].
+    # Trick: Object metadata uses JSON primitives rather than numeric buffers; the encoder preserves ISO dates and nulls.
+    from plotly.utils import PlotlyJSONEncoder
+    return json.loads(json.dumps(value, cls=PlotlyJSONEncoder))
+
+
 def _notebook_figure(figure):
-    # PLOTTING LOGIC: Canonical Plotly JSON maps missing hover diagnostics to null before the widget comm is opened.
-    # Trick: Object-array NaNs can become illegal JSON primitives; numerical arrays may remain valid binary buffers.
-    # The presentation copy alone is serialized; engine results and applied-data exports retain their original values.
+    # PLOTTING LOGIC: Build the presentation copy through trace/layout serializers that preserve native arrays.
+    # Input: a Bar trace with customdata=np.array([[10., 11.], [20., 21.]]).
+    # Output: a FigureWidget whose customdata remains a float64 array with shape (2, 2).
+    # Trick: Plotly 6+ Figure.to_json()/to_plotly_json() encode arrays as {dtype,bdata,shape}; frontend matrix deltas then conflict with those dictionaries.
+    # The presentation copy alone is normalized; engine results and applied-data exports retain their original values.
     import plotly.graph_objects as go
-    widget = go.FigureWidget(json.loads(figure.to_json(remove_uids=False)))
+    data = [_widget_presentation_value(trace.to_plotly_json()) for trace in figure.data]
+    layout = _widget_presentation_value(figure.layout.to_plotly_json())
+    widget = go.FigureWidget(data=data, layout=layout)
     # PLOTTING LOGIC: Unset an inherited fixed width so the native view fills its actual notebook output pane.
     # Trick: FigureWidget.layout is Plotly's chart layout, not ipywidgets.Layout; a scoped DOM class sizes its host.
     widget.layout.width = None
