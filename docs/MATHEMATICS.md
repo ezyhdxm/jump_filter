@@ -411,7 +411,7 @@ $$
 
 ## Optional Quantity and support-trend rules
 
-Both switches default off. See [the worked example and audit contract](OPTIONAL_RULES.md).
+Both primary switches and the verified-cap gate default off. See [the worked example and audit contract](OPTIONAL_RULES.md).
 
 ### 1 · Quantity mapping and weak-evidence decisions
 
@@ -445,10 +445,18 @@ $$
 d_i^{\rm bp}=|y_i-b_i^{\rm support}|/u,\quad E_i^{\max}=\text{reliable support}_i\land(d_i^{\rm bp}>D),\quad D=10\text{ by default}
 $$
 
-### 5 · Decision precedence and honest coverage
+### 5 · Optional verified-cap fitting gate
 
-Invalid inputs, outside-session records and solver failures stay excluded. Reliable maximum-deviation exclusions take precedence over Quantity retention. Otherwise preserve strong algorithm decisions, then apply Quantity decisions only to weak evidence. Policy exclusions have zero fitting weight. Retained uncertain records are fit-eligible by the explicitly chosen policy and have weight 1, but remain unassessed in algorithm-coverage statistics. Review the separate jf_algorithm_* snapshots, jf_policy_reason, support reliability, normalized Quantity and retained-uncertain counts before using the selected sample.
+Require a verified cap check for fitting is an additional switch, off by default and active only when the maximum-distance rule is enabled. If reliable support is missing, exclude the trade from hard and soft fitting with zero weight. A previously unflagged row receives unverified_support, not a confirmed outlier label. Existing algorithm outlier flags and their original audit remain intact. This gate takes precedence over Quantity retention. It reduces fitting coverage at segment endpoints, sparse periods and protected level transitions; it never fills a support gap with a synthetic line. Every hard-fitting row then has reliable support and distance at most the configured limit, up to the documented numerical roundoff allowance.
 
 $$
-E_i^{\max}\Rightarrow\text{policy exclusion},\quad E_i^Q\Rightarrow\text{policy exclusion},\quad R_i^Q\land\neg E_i^{\max}\Rightarrow\text{retained uncertain},\quad\text{coverage}=N_{\rm algorithm\ assessed}/N_{\rm supplied}
+V_i=\mathbf1\{\text{enabled cap and require\_cap\_support}\}\land\neg\text{reliable support}_i,\quad V_i\Rightarrow\texttt{jf\_fit\_eligible}_i=0,\quad V_i\Rightarrow w_i=0,\quad i\in\mathcal D_{\rm hard}\Rightarrow d_i^{\rm bp}\le D+\epsilon_i
+$$
+
+### 6 · Decision precedence and honest coverage
+
+Invalid inputs, outside-session records and solver failures stay excluded. Reliable maximum-deviation exclusions and an enabled verified-cap gate take precedence over Quantity retention. Otherwise preserve strong algorithm decisions, then apply Quantity decisions only to weak evidence. Policy exclusions have zero fitting weight. Retained uncertain records are fit-eligible by the explicitly chosen policy and have weight 1, but remain unassessed in algorithm-coverage statistics. The cap has its own assessed, exceeded and no-reliable-support outcomes: an unassessed cap is not a passed cap. Review jf_policy_cap_status, jf_policy_cap_reason, support reliability, original jf_algorithm_* evidence, normalized Quantity and fitting retention separately.
+
+$$
+E_i^{\max}\lor E_i^Q\Rightarrow\text{policy outlier},\quad V_i\Rightarrow\text{unverified fitting exclusion},\quad R_i^Q\land\neg E_i^{\max}\land\neg V_i\Rightarrow\text{retained uncertain},\quad\text{coverage}=N_{\rm algorithm\ assessed}/N_{\rm supplied}
 $$

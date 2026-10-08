@@ -314,6 +314,7 @@ def test_enabled_policies_keep_compiled_and_python_backend_parity(method):
 
 
 @pytest.mark.parametrize("changes", [{"quantity_rule": 1}, {"max_deviation_rule": "yes"},
+                                      {"require_cap_support": 1}, {"require_cap_support": "yes"},
                                       {"quantity_threshold": 0}, {"quantity_multiplier": -1},
                                       {"quantity_multiplier": np.inf}, {"max_deviation_bps": True},
                                       {"max_deviation_bps": np.nan}, {"spread_units_per_bp": 0}])
@@ -356,3 +357,187 @@ def test_quantity_conversion_reports_overflow_as_unknown():
     values, valid = _quantity_values(frame, "size", 1000000)
     np.testing.assert_allclose(values, [np.nan, 1000000, np.nan], equal_nan=True)
     np.testing.assert_array_equal(valid, [False, True, False])
+
+
+def test_cap_audit_distinguishes_disabled_from_unassessed():
+    # TEST LOGIC: quantity-only screening must never imply the 10bp check ran.
+    result = apply(source(5), FilterConfig(quantity_rule=True), backend="python")
+    assert not result.jf_policy_cap_assessed.any()
+    assert result.jf_policy_cap_status.eq("disabled").all()
+    assert result.jf_policy_retained_uncertain.all()
+
+
+def test_sparse_retained_points_do_not_claim_a_verified_cap():
+    # TEST LOGIC: five events cannot provide the required six leave-target-out references.
+    frame = source(5)
+    frame.loc[1, "oas"] = 140
+    result = apply(frame, FilterConfig(quantity_rule=True, max_deviation_rule=True), backend="python")
+    assert result.jf_fit_eligible.all()
+    assert result.jf_policy_retained_uncertain.all()
+    assert result.jf_support_trend.isna().all()
+    assert not result.jf_policy_cap_assessed.any()
+    assert result.jf_policy_cap_status.eq("no_reliable_support").all()
+
+
+@pytest.mark.parametrize("require_cap_support", [False, True])
+def test_cap_audit_reports_strict_boundary_and_rejection(require_cap_support):
+    # TEST LOGIC: a wide statistical threshold isolates exact10bp and strictly larger10.001bp.
+    frame = source(71, 0)
+    frame.loc[20, "oas"], frame.loc[50, "oas"] = 10, 10.001
+    result = apply(frame, FilterConfig(method="hampel", abs_floor=100, max_deviation_rule=True,
+                                      require_cap_support=require_cap_support), backend="python")
+    assert result.loc[[20, 50], "jf_policy_cap_assessed"].all()
+    assert result.iloc[20].jf_policy_cap_status == "within_limit"
+    assert result.iloc[50].jf_policy_cap_status == "exceeded"
+    assert result.iloc[20].jf_fit_eligible and not result.iloc[50].jf_fit_eligible
+
+
+def test_invalid_input_is_not_an_unverified_actionable_cap_point():
+    # TEST LOGIC: operationally invalid rows remain distinguishable from a valid unsupported trade.
+    frame = source()
+    frame.loc[0, "stamp"] = pd.NaT
+    result = apply(frame, FilterConfig(quantity_rule=True, max_deviation_rule=True), backend="python")
+    assert result.iloc[0].jf_policy_cap_status == "not_actionable"
+    assert not result.iloc[0].jf_policy_cap_assessed
+    assert not result.iloc[0].jf_fit_eligible
+
+
+def test_protected_jump_diagnostic_distance_is_not_an_assessed_cap():
+    # TEST LOGIC: two genuine regimes100/130 have a misleading midpoint115; each real print remains valid evidence.
+    frame = source(71)
+    frame.loc[35:, "oas"] = 130
+    result = apply(frame, FilterConfig(method="local_piecewise", quantity_rule=True,
+                                      max_deviation_rule=True), backend="python")
+    transition = result.loc[32:37]
+    assert (transition.jf_support_distance_bps > 10).all()
+    assert transition.jf_policy_retained_uncertain.all()
+    assert transition.jf_fit_eligible.all()
+    assert transition.jf_support_reason.eq("protected_transition").all()
+    assert transition.jf_policy_cap_status.eq("no_reliable_support").all()
+    assert not transition.jf_policy_cap_assessed.any()
+
+
+@pytest.mark.parametrize("method", ["hampel", "rolling_iqr", "local_linear", "jump_reversion",
+                                    "multiscale", "local_piecewise", "robust_trend", "consensus", "causal_ewma"])
+def test_reliable_cap_has_no_fit_eligible_violations_across_methods(method):
+    # TEST LOGIC: irregular hours, liquidity variation, a long inactivity gap and isolated spikes share one invariant.
+    frame = source(91)
+    spacing = np.resize(np.array([7, 13, 41, 61, 11], dtype=np.int64), len(frame))
+    frame["stamp"] = pd.Timestamp("2026-09-14T09:00") + pd.to_timedelta(np.cumsum(spacing), unit="m")
+    frame.loc[45:, "stamp"] += pd.Timedelta("4D")
+    frame["oas"] = 100 + .1 * np.arange(len(frame))
+    frame.loc[[1, 20, 65, 89], "oas"] += np.array([21, -25, 30, -19])
+    frame["ticket_notional"] = 2000000
+    result = apply(frame, FilterConfig(method=method, quantity_rule=True, max_deviation_rule=True), backend="python")
+    verified = result.jf_policy_cap_assessed
+    exceeds = result.jf_support_distance_bps > 10 + result.jf_support_distance_tolerance_bps
+    assert verified.any() and result.jf_policy_max_deviation.any()
+    assert not (result.jf_fit_eligible & verified & exceeds).any()
+    assert result.loc[verified & exceeds, "jf_policy_cap_status"].eq("exceeded").all()
+    assert result.loc[verified & ~exceeds, "jf_policy_cap_status"].eq("within_limit").all()
+    assert not result.loc[[0, 44, 45, 90], "jf_policy_cap_assessed"].any()
+
+
+def test_strict_cap_excludes_unverified_sparse_trades_without_claiming_outliers():
+    # TEST LOGIC: insufficient evidence fails strict fitting certification but does not establish an anomaly.
+    frame = source(5)
+    frame.loc[1, "oas"] = 140
+    frame["ticket_notional"] = 2000000
+    result = apply(frame, FilterConfig(quantity_rule=True, max_deviation_rule=True,
+                                      require_cap_support=True), backend="python")
+    assert result.jf_status.eq("unverified_support").all()
+    assert result.jf_algorithm_status.eq("insufficient_history").all()
+    assert not result.jf_is_outlier.any() and not result.jf_fit_eligible.any()
+    assert result.jf_weight.eq(0).all()
+    assert result.jf_policy_support_unverified.all()
+    assert not result.jf_policy_retained_uncertain.any()
+    assert result.jf_policy_reason.eq("support_trend_unverified_for_fitting").all()
+    assert select_fit_data(result).empty
+    assert select_fit_data(result, policy="soft", include_provisional=True).empty
+
+
+def test_strict_cap_preserves_original_outlier_evidence_and_blocks_soft_rescue():
+    # TEST LOGIC: an endpoint130 can be a one-sided algorithm outlier while lacking strict two-sided support.
+    frame = source()
+    frame.loc[0, "oas"] = 130
+    result = apply(frame, FilterConfig(method="local_linear", max_deviation_rule=True,
+                                      require_cap_support=True), backend="python")
+    row = result.iloc[0]
+    assert row.jf_algorithm_status == row.jf_status == "outlier"
+    assert row.jf_algorithm_is_outlier and row.jf_is_outlier
+    assert row.jf_algorithm_weight > 0 and row.jf_weight == 0
+    assert not row.jf_fit_eligible and row.jf_policy_support_unverified
+    assert 0 not in select_fit_data(result, policy="soft").index
+
+
+def test_strict_support_gate_has_no_effect_while_cap_is_disabled():
+    # TEST LOGIC: the strict sub-control belongs to the cap; toggling it alone must preserve quantity decisions.
+    frame = source(5)
+    baseline = apply(frame, FilterConfig(quantity_rule=True), backend="python")
+    strict_off = apply(frame, FilterConfig(quantity_rule=True, require_cap_support=True), backend="python")
+    pd.testing.assert_frame_equal(baseline, strict_off)
+    assert strict_off.jf_fit_eligible.all()
+    assert not strict_off.jf_policy_support_unverified.any()
+
+
+@pytest.mark.parametrize("method", ["consensus", "local_piecewise"])
+def test_strict_cap_keeps_turning_point_and_abstains_across_genuine_step(method):
+    # TEST LOGIC: a continuous100bp peak is certified; the conflicting100/130 regimes are unverified rather than bad prints.
+    frame = source(91)
+    frame["oas"] = (100 - 4 * np.abs(np.arange(91) - 45)).astype(float)
+    frame["ticket_notional"] = 2000000
+    config = FilterConfig(method=method, quantity_rule=True, max_deviation_rule=True, require_cap_support=True)
+    corner = apply(frame, config, backend="python")
+    assert corner.iloc[45].jf_policy_cap_status == "within_limit"
+    assert corner.iloc[45].jf_fit_eligible
+    assert not corner.jf_policy_max_deviation.any()
+    step = source(71)
+    step.loc[35:, "oas"] = 130
+    transition = apply(step, config, backend="python").loc[32:37]
+    assert transition.jf_policy_support_unverified.all()
+    assert transition.jf_status.eq("unverified_support").all()
+    assert not transition.jf_is_outlier.any()
+    assert not transition.jf_fit_eligible.any() and transition.jf_weight.eq(0).all()
+
+
+@pytest.mark.parametrize("method", ["hampel", "rolling_iqr", "local_linear", "jump_reversion",
+                                    "multiscale", "local_piecewise", "robust_trend", "consensus", "causal_ewma"])
+def test_strict_fit_rows_are_all_certified_inside_cap_across_methods(method):
+    # TEST LOGIC: a 30bp spike, endpoints and a four-day gap challenge strict certification for every method.
+    frame = source(71)
+    frame["ticket_notional"] = 2000000
+    frame.loc[25, "oas"] = 130
+    frame.loc[35:, "stamp"] += pd.Timedelta("4D")
+    result = apply(frame, FilterConfig(method=method, quantity_rule=True, max_deviation_rule=True,
+                                      require_cap_support=True), backend="python")
+    eligible = result.jf_fit_eligible
+    assert eligible.any()
+    assert result.loc[eligible, "jf_policy_cap_assessed"].all()
+    assert result.loc[eligible, "jf_policy_cap_status"].eq("within_limit").all()
+    distance = result.loc[eligible, "jf_support_distance_bps"]
+    tolerance = result.loc[eligible, "jf_support_distance_tolerance_bps"]
+    assert (distance <= 10 + tolerance).all()
+    soft = select_fit_data(result, policy="soft", include_provisional=True)
+    assert soft.jf_policy_cap_assessed.all()
+    assert soft.jf_policy_cap_status.eq("within_limit").all()
+    assert not result.loc[[0, 34, 35, 70], "jf_fit_eligible"].any()
+
+
+def test_strict_cap_uses_active_time_across_weekend_and_excludes_closed_events():
+    # TEST LOGIC: Friday18:25NY to Monday08:00NY spans5 active minutes; Saturday10:00NY is outside the calendar.
+    friday = pd.date_range("2026-09-18T17:00", periods=18, freq="5min", tz="America/New_York")
+    monday = pd.date_range("2026-09-21T08:00", periods=18, freq="5min", tz="America/New_York")
+    frame = source(37)
+    frame["stamp"] = pd.DatetimeIndex([*friday, *monday, pd.Timestamp("2026-09-19T10:00", tz="America/New_York")])
+    frame["ticket_notional"] = 2000000
+    frame.loc[[8, 26], "oas"] = [125, 75]
+    config = FilterConfig(time_basis="trading", horizon="3h", max_gap="30min", quantity_rule=True,
+                          max_deviation_rule=True, require_cap_support=True)
+    result = apply(frame, config, backend="python")
+    assert result.loc[[17, 18], "jf_policy_cap_assessed"].all()
+    assert result.loc[[17, 18], "jf_fit_eligible"].all()
+    assert result.iloc[18].jf_session_boundary
+    assert result.loc[[8, 26], "jf_policy_max_deviation"].all()
+    assert result.iloc[36].jf_status == "outside_session"
+    assert result.iloc[36].jf_policy_cap_status == "not_actionable"
+    assert not result.iloc[36].jf_fit_eligible

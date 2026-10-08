@@ -43,6 +43,7 @@ class FilterConfig:
     quantity_threshold: float = 1_000_000.0
     quantity_multiplier: float = 1.0
     max_deviation_rule: bool = False
+    require_cap_support: bool = False
     max_deviation_bps: float = 10.0
     spread_units_per_bp: float = 1.0
 
@@ -50,7 +51,7 @@ class FilterConfig:
         # CONFIGURATION LOGIC: fail before processing on incompatible controls.
         if self.method not in METHODS:
             raise ValueError(f"method must be one of {METHODS}")
-        for name in ("quantity_rule", "max_deviation_rule"):
+        for name in ("quantity_rule", "max_deviation_rule", "require_cap_support"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a boolean")
         for name in ("quantity_threshold", "quantity_multiplier", "max_deviation_bps", "spread_units_per_bp"):

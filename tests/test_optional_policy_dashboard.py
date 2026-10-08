@@ -31,6 +31,29 @@ def test_policy_statistics_keep_algorithm_coverage_separate_from_final_retention
     assert audit_tables(result)["daily"]["evaluated"].sum() == stats["evaluated"]
 
 
+def test_cap_audit_counts_checked_unchecked_retention_and_strict_exclusions_separately():
+    # TEST LOGIC: Two no-support rows have different fitting outcomes; neither counts as a passed cap or statistically assessed observation.
+    rows = pd.DataFrame({"jf_row_id": [0, 1, 2, 3], "jf_time": pd.date_range("2026-10-01T14:00Z", periods=4, freq="min"),
+                         "jf_status": ["retained_uncertain", "retained_uncertain", "policy_outlier", "unverified_support"],
+                         "jf_algorithm_status": ["insufficient_history"] * 4, "jf_reason": ["quantity_uncertain_retained", "quantity_uncertain_retained", "support_trend_max_deviation_exceeded", "unverified_support"],
+                         "jf_is_outlier": [False, False, True, False], "jf_regime_change": [False] * 4,
+                         "jf_fit_eligible": [True, True, False, False], "jf_policy_retained_uncertain": [True, True, False, False],
+                         "jf_policy_cap_assessed": [True, False, True, False], "jf_policy_cap_status": ["within_limit", "no_reliable_support", "exceeded", "no_reliable_support"],
+                         "jf_support_reason": ["reliable_two_sided_support", "protected_transition", "reliable_two_sided_support", "protected_transition"],
+                         "jf_policy_support_unverified": [False, False, False, True]})
+    rows.attrs["jump_filter"] = {"config": {"max_deviation_rule": True}}
+    stats = evaluation_summary(rows)
+    assert stats["cap_enabled"] and stats["cap_assessed"] == stats["cap_unassessed"] == 2
+    assert stats["retained_cap_unassessed"] == stats["support_unverified"] == 1
+    assert stats["evaluated"] == 0 and stats["fit_eligible"] == 2
+    assessment = audit_tables(rows)["cap_assessment"]
+    assert assessment["jf_policy_cap_status"].tolist() == ["exceeded", "no_reliable_support", "within_limit"]
+    assert assessment["trades"].tolist() == [1, 2, 1] and assessment["fit_eligible"].tolist() == [0, 1, 1]
+    from jump_filter.dashboard import _kpi_html
+    assert "1 retained uncertain without a cap check" in _kpi_html(stats)
+    assert "1 excluded by the strict support gate" in _kpi_html(stats)
+
+
 def test_notebook_optional_controls_apply_mapping_and_export_only_successful_snapshot(monkeypatch, tmp_path):
     # TEST LOGIC: Rich output is covered elsewhere; this test follows mappings through Apply, bond focus and export.
     pytest.importorskip("ipywidgets")
@@ -41,6 +64,7 @@ def test_notebook_optional_controls_apply_mapping_and_export_only_successful_sna
     monkeypatch.setattr(FilterDashboard, "_publish", lambda *args: None)
     panel = FilterDashboard(_source(), config=FilterConfig(method="local_piecewise", window=6, min_neighbors=6), quantity_col="old_size")
     assert not panel.quantity_rule.value and not panel.max_deviation_rule.value
+    assert not panel.require_cap_support.value and panel.require_cap_support.disabled
     assert panel.quantity_multiplier.value == 1
     assert panel.policy_params["quantity_threshold"].value == 1000000
     assert panel.policy_params["max_deviation_bps"].value == 10
@@ -86,6 +110,8 @@ def test_streamlit_optional_policy_controls_and_failed_mapping_preserve_applied_
     next(box for box in app.checkbox if box.label == "Enable Quantity-sensitive screening").check().run()
     assert not next(box for box in app.selectbox if box.label == "Spread numeric units").disabled
     next(box for box in app.checkbox if box.label == "Enable maximum support-trend deviation").check().run()
+    assert not next(box for box in app.checkbox if box.label == "Require a verified cap check for fitting").disabled
+    next(box for box in app.checkbox if box.label == "Require a verified cap check for fitting").check().run()
     app.number_input(key="jf_number_max_deviation_bps").set_value(12.).run()
     assert app.slider(key="jf_slider_max_deviation_bps").value == 12
     app.slider(key="jf_slider_quantity_threshold").set_value(1500000.).run()
@@ -95,6 +121,10 @@ def test_streamlit_optional_policy_controls_and_failed_mapping_preserve_applied_
     review = app.session_state["jf_review"]
     assert review["mapping"]["quantity_col"] == "Quantity"
     assert review["config"].quantity_rule and review["config"].max_deviation_rule
+    assert review["config"].require_cap_support and review["result"]["jf_policy_support_unverified"].any()
+    for policy in ["hard", "soft"]:
+        fitting = select_fit_data(review["result"], policy=policy)
+        assert fitting["jf_policy_cap_assessed"].all() and fitting["jf_policy_cap_status"].eq("within_limit").all()
     assert review["config"].quantity_multiplier == review["config"].spread_units_per_bp == 1
     assert review["config"].quantity_threshold == 1500000
     assert "jf_policy_reason" in review["result"]
@@ -137,3 +167,28 @@ def test_notebook_policy_slider_grids_and_accessible_inputs_preserve_exact_apply
     assert cap.value == 13
     panel.run()
     assert panel.applied_config.max_deviation_bps == 13
+
+
+def test_notebook_strict_cap_gate_is_applied_only_with_enabled_cap(monkeypatch):
+    # TEST LOGIC: Pending strict edits cannot alter fitting exports until Apply; disabling the cap disables the strict gate while retaining the checkbox preference.
+    pytest.importorskip("ipywidgets")
+    from jump_filter.dashboard import FilterDashboard
+    monkeypatch.setattr(FilterDashboard, "_render_explanation", lambda panel: None)
+    monkeypatch.setattr(FilterDashboard, "_empty_outputs", lambda panel: None)
+    monkeypatch.setattr(FilterDashboard, "_render", lambda panel, record: ())
+    monkeypatch.setattr(FilterDashboard, "_publish", lambda *args: None)
+    panel = FilterDashboard(_source(), config=FilterConfig(method="local_piecewise", window=6, min_neighbors=6, quantity_rule=True, max_deviation_rule=True), quantity_col="new_size")
+    panel.run()
+    initial = panel.result
+    panel.require_cap_support.value = True
+    assert panel.result is initial and not panel.applied_config.require_cap_support
+    panel.run()
+    assert panel.applied_config.require_cap_support and panel.result["jf_policy_support_unverified"].any()
+    for policy in ["hard", "soft"]:
+        chosen = select_fit_data(panel.result, policy=policy)
+        assert chosen["jf_policy_cap_assessed"].all() and chosen["jf_policy_cap_status"].eq("within_limit").all()
+    panel.max_deviation_rule.value = False
+    assert panel.require_cap_support.disabled and panel.require_cap_support.value
+    panel.run()
+    assert not panel.applied_config.require_cap_support and not panel.applied_config.max_deviation_rule
+    assert panel.result["jf_policy_retained_uncertain"].any()

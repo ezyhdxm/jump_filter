@@ -106,6 +106,17 @@ def evaluation_summary(annotated):
                  retained_uncertain=int(annotated.get("jf_policy_retained_uncertain", empty).sum()),
                  quantity_rejected=int(annotated.get("jf_policy_quantity_rejected", empty).sum()),
                  max_deviation_rejected=int(annotated.get("jf_policy_max_deviation", empty).sum()))
+    # Input: cap enabled=True,statuses=['within_limit','no_reliable_support','exceeded','not_actionable'],assessed=[True,False,True,False],retained_uncertain=[True,True,False,False].
+    # Output: cap_enabled=True,cap_assessed=2,cap_unassessed=1,retained_cap_unassessed=1,support_unverified=0 when the strict gate mask is absent.
+    # Trick: Missing support is an abstention, not a passed distance check; invalid/non-actionable rows are reported separately in the cap audit table.
+    # CORE LOGIC: STEP 3 — Report the absolute cap's actual assessment coverage.
+    cap_status = annotated.get("jf_policy_cap_status", pd.Series("disabled", index=annotated.index))
+    cap_enabled = bool(annotated.attrs.get("jump_filter", {}).get("config", {}).get("max_deviation_rule", False))
+    cap_assessed = annotated.get("jf_policy_cap_assessed", empty).fillna(False)
+    cap_unassessed = cap_status.eq("no_reliable_support")
+    stats.update(cap_enabled=cap_enabled, cap_assessed=int(cap_assessed.sum()), cap_unassessed=int(cap_unassessed.sum()),
+                 retained_cap_unassessed=int((annotated.get("jf_policy_retained_uncertain", empty) & cap_unassessed).sum()),
+                 support_unverified=int(annotated.get("jf_policy_support_unverified", empty).sum()))
     return stats
 
 
@@ -150,7 +161,8 @@ def method_comparison(data, config, *, cusip_col="CUSIP", time_col="time", sprea
     # Output: each supported method (e.g. hampel) produces
     # each row has total=1,evaluated=0,outliers=0,flag_rate=NaN,invalid=0,
     # unsupported=1,provisional=0,regime_changes=0,fit_eligible=0,algorithm_outliers=0,
-    # retained_uncertain=0,quantity_rejected=0,max_deviation_rejected=0.
+    # retained_uncertain=0,quantity_rejected=0,max_deviation_rejected=0,cap_enabled=False,
+    # cap_assessed=0,cap_unassessed=0,retained_cap_unassessed=0,support_unverified=0.
     # Trick: Every method sees the same rows and hyperparameters; no result is chosen by its flag rate.
     # CORE LOGIC: STEP 1 — Recompute each algorithm on the same review population.
     for method in METHODS:
@@ -186,6 +198,13 @@ def audit_tables(annotated):
     # CORE LOGIC: STEP 3 — Aggregate the optional policy decision audit.
     if "jf_policy_reason" in annotated:
         tables["policy_reasons"] = annotated.groupby("jf_policy_reason", dropna=False, sort=True).agg(
+            trades=("jf_row_id", "size"), flagged=("jf_is_outlier", "sum"), fit_eligible=("jf_fit_eligible", "sum")).reset_index()
+    # Input: cap statuses=['within_limit','no_reliable_support','exceeded'],support reasons=['reliable_two_sided_support','protected_transition','reliable_two_sided_support'],fit_eligible=[True,True,False].
+    # Output: lexical status rows=['exceeded','no_reliable_support','within_limit'],trades=[1,1,1],flagged=[1,0,0],fit_eligible=[0,1,1].
+    # Trick: A preserved diagnostic distance can exist without reliable support; group its abstention reason instead of treating it as a successful cap check.
+    # CORE LOGIC: STEP 4 — Audit cap assessment and abstention independently of final retention.
+    if "jf_policy_cap_status" in annotated:
+        tables["cap_assessment"] = annotated.groupby(["jf_policy_cap_status", "jf_support_reason"], dropna=False, sort=True).agg(
             trades=("jf_row_id", "size"), flagged=("jf_is_outlier", "sum"), fit_eligible=("jf_fit_eligible", "sum")).reset_index()
     return tables
 
@@ -274,6 +293,10 @@ def _table_html(frame, *, limit=200):
                   jf_algorithm_reason="Algorithm reason", jf_algorithm_is_outlier="Algorithm outlier", jf_quantity="Normalized notional",
                   jf_quantity_notional="Normalized notional", jf_quantity_valid="Valid Quantity", jf_support_trend="Independent support trend",
                   jf_support_reliable="Reliable support", jf_support_residual="Support-trend residual", jf_support_distance_bps="Support distance · bp")
+    labels.update(cap_enabled="Distance cap enabled", cap_assessed="Cap assessed", cap_unassessed="Cap unchecked · no reliable support",
+                  retained_cap_unassessed="Retained uncertain · cap unchecked", jf_policy_cap_status="Distance-cap assessment",
+                  jf_policy_cap_assessed="Cap assessed", jf_policy_cap_reason="Cap reason", jf_support_reason="Support reason",
+                  support_unverified="Strict support gate exclusions", jf_policy_support_unverified="Strict support gate applied")
     for name in ["coverage", "flagged_rate", "flag_rate", "hard_retention"]:
         if name in shown:
             shown[name] = shown[name].map(lambda value: f"{value:.1%}" if pd.notna(value) else "—")
@@ -289,8 +312,9 @@ def _kpi_html(stats):
              ("Final outlier flags", f'{stats["outliers"]:,}'), ("Flags / algorithm assessed", rate),
              ("Insufficient support", f'{stats["unsupported"]:,}'), ("Invalid input", f'{stats["invalid"]:,}')]
     classes = ["", "", " jf-kpi-alert", " jf-kpi-rate", "", ""]
+    cap_note = (f'<p class="jf-help">Distance cap: {stats["cap_assessed"]:,} assessed · {stats["cap_unassessed"]:,} unchecked because support is unreliable · {stats["retained_cap_unassessed"]:,} retained uncertain without a cap check · {stats["support_unverified"]:,} excluded by the strict support gate. Dashed limits apply only at trades with reliable support; nearby limits do not certify an unchecked trade.</p>' if stats["cap_enabled"] else "")
     return ('<div class="jf-kpis">' + ''.join(f'<div class="jf-kpi{style}"><strong>{value}</strong><span>{label}</span></div>' for (label, value), style in zip(items, classes)) + '</div>' +
-            f'<p class="jf-help">Final fit eligible: {stats["fit_eligible"]:,} · explicitly retained uncertain: {stats["retained_uncertain"]:,} · original algorithm flags: {stats["algorithm_outliers"]:,} · small suspicious exclusions: {stats["quantity_rejected"]:,} · support-trend cap exclusions: {stats["max_deviation_rejected"]:,}. The assessed flag rate excludes unassessed policy decisions.</p>')
+            f'<p class="jf-help">Final fit eligible: {stats["fit_eligible"]:,} · explicitly retained uncertain: {stats["retained_uncertain"]:,} · original algorithm flags: {stats["algorithm_outliers"]:,} · small suspicious exclusions: {stats["quantity_rejected"]:,} · support-trend cap exclusions: {stats["max_deviation_rejected"]:,}. The assessed flag rate excludes unassessed policy decisions.</p>' + cap_note)
 
 
 def _widget_presentation_value(value):
@@ -455,6 +479,7 @@ class FilterDashboard:
         # UI LOGIC: Optional policy controls are independent of the selected statistical method.
         self.quantity_rule = w.Checkbox(value=self.config.quantity_rule, description="Enable Quantity-sensitive screening")
         self.max_deviation_rule = w.Checkbox(value=self.config.max_deviation_rule, description="Enable maximum support-trend deviation")
+        self.require_cap_support = w.Checkbox(value=self.config.require_cap_support, description="Require a verified cap check for fitting")
         self.quantity_col = w.Dropdown(description="Quantity column", options=[("Not mapped", None), *[(str(name), name) for name in data.columns]], value=quantity_col)
         quantity_options = [("Raw amount · 1MM = 1,000,000", 1.), ("Thousands · 1MM = 1,000", 1000.), ("Millions · 1MM = 1", 1000000.)]
         spread_options = [("Basis points · 1 bp = 1", 1.), ("Percentage points · 1 bp = 0.01", .01), ("Decimal · 1 bp = 0.0001", .0001)]
@@ -477,7 +502,7 @@ class FilterDashboard:
             self.policy_params[name], self._policy_sliders[name] = number, slider
             values_row = w.HBox([slider, number], layout=w.Layout(width="100%")).add_class("jf-param-values")
             policy_cards.append(w.VBox([w.HTML(f'<div class="jf-param-title">{escape(label)}</div>'), values_row, w.HTML(f'<p class="jf-help">{escape(PARAMETER_HELP[name])}</p>')]).add_class("jf-param"))
-        self._policy_controls = [self.quantity_rule, self.quantity_col, self.quantity_multiplier, self.max_deviation_rule, self.spread_units_per_bp, *self.policy_params.values()]
+        self._policy_controls = [self.quantity_rule, self.quantity_col, self.quantity_multiplier, self.max_deviation_rule, self.require_cap_support, self.spread_units_per_bp, *self.policy_params.values()]
         self.horizon = w.Text(value=str(self.config.horizon), description="Reference horizon (e.g. 3D)")
         self.max_gap = w.Text(value=str(self.config.max_gap), description="Session break gap (e.g. 1D)")
         self.time_basis = w.Dropdown(options=[("Cumulative trading time", "trading"), ("Wall-clock time", "wall")], value=self.config.time_basis, description="Distance clock")
@@ -491,7 +516,7 @@ class FilterDashboard:
             control.add_class("jf-control")
             control.style.description_width = "initial"
         # UI LOGIC: Native checkboxes retain their horizontal label/input structure, separate from vertically labeled text controls.
-        for control in [self.quantity_rule, self.max_deviation_rule]:
+        for control in [self.quantity_rule, self.max_deviation_rule, self.require_cap_support]:
             control.add_class("jf-policy-toggle")
         # UI LOGIC: CUSIP selection changes the view only; parameter edits await explicit Apply.
         self.cusip.observe(self._focus_changed, names="value")
@@ -513,8 +538,8 @@ class FilterDashboard:
         policy_grid = w.Box(policy_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
         # UI LOGIC: Vertical policy controls use their natural heights; wrapping rows retain the shared horizontal flex sizing.
         # Trick: A 230px flex basis means height inside VBox, so override it only for this panel's direct control children.
-        policies = w.VBox([self.quantity_rule, self._row(self.quantity_col, self.quantity_multiplier), self.max_deviation_rule,
-                           self.spread_units_per_bp, policy_grid, w.HTML('<p class="jf-help">Both rules are optional. Small trades are excluded only with suspicious evidence. Known positive Quantity can retain weak-evidence records explicitly as retained uncertain; confirmed algorithm outliers remain excluded at every size. Independent support follows separate left/right trends where both sides have enough references; disagreement disables the hard cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. No Quantity or spread units are inferred from labels.</p>')]).add_class("jf-policy-controls")
+        policies = w.VBox([self.quantity_rule, self._row(self.quantity_col, self.quantity_multiplier), self.max_deviation_rule, self.require_cap_support,
+                           self.spread_units_per_bp, policy_grid, w.HTML('<p class="jf-help">Both rules are optional. Small trades are excluded only with suspicious evidence. Known positive Quantity can retain weak-evidence records explicitly as retained uncertain; confirmed algorithm outliers remain excluded at every size. Independent support follows separate left/right trends where both sides have enough references; disagreement disables the hard cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. An unchecked retained trade has not passed the distance cap and may lie beyond nearby dashed limits. Require a verified cap check for fitting excludes these unverified trades from hard and soft fitting without labeling them outliers. This stricter choice can reduce coverage at endpoints, sparse periods and liquidity changes. No Quantity or spread units are inferred from labels.</p>')]).add_class("jf-policy-controls")
         settings = w.Accordion(children=[w.VBox([parameter_grid, self._row(self.horizon, self.max_gap)]), calendar, policies], selected_index=None)
         settings.set_title(0, "Tune detection · relevant parameters and exact values")
         settings.set_title(1, "Trading calendar · sessions, closures and gaps")
@@ -569,6 +594,7 @@ class FilterDashboard:
                             holidays=tuple(value.strip() for value in self.holidays.value.split(",") if value.strip()),
                             quantity_rule=self.quantity_rule.value, quantity_multiplier=self.quantity_multiplier.value,
                             max_deviation_rule=self.max_deviation_rule.value, spread_units_per_bp=self.spread_units_per_bp.value,
+                            require_cap_support=self.require_cap_support.value and self.max_deviation_rule.value,
                             **{name: control.value for name, control in self.params.items()},
                             **{name: control.value for name, control in self.policy_params.items()})
 
@@ -590,7 +616,7 @@ class FilterDashboard:
         # UI LOGIC: Inactive policy values remain visible for auditing but cannot accidentally edit a running review.
         for control in [self.quantity_col, self.quantity_multiplier, self.policy_params["quantity_threshold"], self._policy_sliders["quantity_threshold"]]:
             control.disabled = self.busy or not self.quantity_rule.value
-        for control in [self.policy_params["max_deviation_bps"], self._policy_sliders["max_deviation_bps"]]:
+        for control in [self.policy_params["max_deviation_bps"], self._policy_sliders["max_deviation_bps"], self.require_cap_support]:
             control.disabled = self.busy or not self.max_deviation_rule.value
         self.spread_units_per_bp.disabled = self.busy or not (self.quantity_rule.value or self.max_deviation_rule.value)
 
@@ -633,6 +659,7 @@ class FilterDashboard:
                  ("quantity_multiplier", self.quantity_multiplier.value, PARAMETER_HELP["quantity_multiplier"]),
                  ("quantity_threshold", self.policy_params["quantity_threshold"].value, PARAMETER_HELP["quantity_threshold"]),
                  ("max_deviation_rule", self.max_deviation_rule.value, "Enable reliable support-trend distance exclusion"),
+                 ("require_cap_support", self.require_cap_support.value and self.max_deviation_rule.value, "Require reliable support and a verified distance check for hard and soft fitting; excludes unverified rows without calling them outliers"),
                  ("max_deviation_bps", self.policy_params["max_deviation_bps"].value, PARAMETER_HELP["max_deviation_bps"]),
                  ("spread_units_per_bp", self.spread_units_per_bp.value, PARAMETER_HELP["spread_units_per_bp"])]
         contents = [HTML(_table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"])))]
@@ -698,7 +725,7 @@ class FilterDashboard:
         from IPython.display import HTML
         self.kpis.value = f'<p class="jf-help">Headline counts · selected bond {escape(str(self.cusip.value))}. Statistics and annotated exports · {"all bonds" if self.applied_scope == "all" else "selected bond"}.</p>' + _kpi_html(evaluation_summary(selected))
         contents = [HTML('<div class="jf-section-heading"><h4>Spread history &amp; review flags</h4><span class="jf-help">Actual trade timestamps · UTC</span></div>'),
-                    figure, HTML('<p class="jf-help">Red crosses mark final outlier exclusions, including optional policy decisions. Gray open circles are unscored; amber open circles are explicitly retained uncertain and fit eligible; amber open diamonds mark unresolved transitions. Shading shows the method\'s statistical cutoff. Optional dashed limits show the separate support-trend distance cap. Closures, configured gap breaks and missing usable references interrupt both paths. Hover for exact evidence and reasons.</p>')]
+                    figure, HTML('<p class="jf-help">Red crosses mark final outlier exclusions, including optional policy decisions. Gray open circles are unscored; gray open squares are unverified trades excluded from fitting by the strict support gate. Amber open circles are retained uncertain; with the cap enabled, amber open squares identify retained trades without a reliable cap check. These unchecked trades can lie beyond nearby dashed limits. Amber open diamonds mark unresolved transitions. Shading shows the method\'s statistical cutoff; dashed limits apply only at trades with reliable independent support. Closures, configured gap breaks and missing usable references interrupt both paths. Hover for the cap assessment, support reason and preserved algorithm evidence.</p>')]
         counts = figure.layout.meta or {}
         if counts.get("sampled"):
             contents.append(HTML(f'<p class="jf-help">Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports retain every reviewed trade.</p>'))
@@ -721,6 +748,9 @@ class FilterDashboard:
                   ("Selected bond · complete trade audit", _table_html(selected))]
         if "policy_reasons" in audits:
             groups.insert(2, ("Selected bond · optional policy decisions", '<h4>Optional policy decisions</h4>' + _table_html(audits["policy_reasons"])))
+        if "cap_assessment" in audits:
+            groups.insert(3, ("Selected bond · distance-cap assessment", '<h4>Distance-cap assessment and support reasons</h4>' + _table_html(audits["cap_assessment"]) +
+                                 '<p class="jf-help">Within limit means a reliable cap check passed. No reliable support means the cap abstained; retention then follows the other enabled decisions.</p>'))
         sections = []
         for _, contents in groups:
             section = self.w.Output(layout=self.w.Layout(width="100%"))

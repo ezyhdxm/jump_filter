@@ -926,6 +926,21 @@ def summarize(annotated, *, cusip_col="CUSIP"):
                            flagged_evaluated=("_flagged_evaluated", "sum"))
         summary = summary.join(extra)
         summary["flagged_rate"] = summary["flagged_evaluated"].div(summary["evaluated"].replace(0, np.nan))
+
+    # Input: one bond cap statuses=['within_limit','no_reliable_support','exceeded'],
+    # assessed=[True,False,True],retained=[True,True,False],strict unverified all False
+    # -> Output: cap_assessed=2,cap_unassessed=1,retained_cap_unassessed=1,support_unverified=0.
+    # Trick: coverage counts only actionable cap abstentions; invalid records retain
+    # their separate state. Quantity-only reviews report zero enabled-cap assessments.
+    # CORE LOGIC: STEP 5 — Summarize verified and unverified distance decisions.
+    if "jf_policy_cap_status" in data:
+        data["_cap_unassessed"] = data["jf_policy_cap_status"].eq("no_reliable_support")
+        data["_retained_cap_unassessed"] = data["jf_policy_retained_uncertain"] & data["_cap_unassessed"]
+        summary = summary.join(groups.agg(cap_assessed=("jf_policy_cap_assessed", "sum"),
+                                         cap_unassessed=("_cap_unassessed", "sum"),
+                                         retained_cap_unassessed=("_retained_cap_unassessed", "sum"),
+                                         support_unverified=("jf_policy_support_unverified", "sum")))
+    # OUTPUT ASSEMBLY LOGIC: Restore the public CUSIP column as ordinary tabular data.
     return summary.reset_index()
 
 
@@ -936,7 +951,8 @@ def select_fit_data(annotated, *, policy="hard", include_provisional=False):
     anomalies with bounded influence weights. These weights are not inverse
     variances and do not solve identification of the economic mid.
     An enabled quantity rule can explicitly retain uncertain rows in both
-    modes; mandatory policy outliers remain excluded in both modes.
+    modes; mandatory policy outliers and optional unverified-support exclusions
+    remain excluded in both modes.
     """
     # CONFIGURATION LOGIC: require engine annotations and an explicit downstream policy.
     if policy not in ("hard", "soft"):

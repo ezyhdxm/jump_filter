@@ -42,6 +42,8 @@ Notebook sections replace one complete output snapshot when a review changes. Re
 
 Version 0.4.1 fixes a Plotly `AssertionError` that can appear below the dashboard after Apply or CUSIP navigation. Live figures preserve native numerical arrays instead of reconstructing them from Plotly's encoded JSON representation; missing hover metadata still travels as JSON-safe nulls. Update the package in the active notebook environment, restart the kernel, clear old outputs and rerun the dashboard cell. Recreating the existing chart widgets is necessary for the fix to take effect.
 
+Version 0.4.2 distinguishes retained trades with a checked cap from retained trades without reliable support. Enable **Require a verified cap check for fitting** alongside the distance rule to exclude unverified trades from fitting. Their separate `unverified_support` status preserves the distinction between insufficient evidence and a confirmed outlier.
+
 The fresh-install browser check used Python 3.13, Notebook 7.6.3, JupyterLab 4.6.4, ipykernel 7.4.0, ipywidgets 8.1.9, anywidget 0.11.0 and Plotly 7.1.0. It verified bond/method selection, paired parameter controls, Apply, native charts, mathematical explanations and method comparison inside Notebook. The test suite also executes the supplied notebook in an actual Jupyter kernel.
 
 ## Large portfolios
@@ -101,6 +103,7 @@ Both dashboards include an **Optional fitting rules** section. Each rule starts 
 
 - **Quantity-aware uncertainty:** choose any quantity column and its units. Original amounts use multiplier 1; the default small-trade boundary is strictly below 1,000,000. Small uncertain trades with independent suspicious evidence are rejected. Otherwise valid known-size uncertain trades are explicitly retained as `retained_uncertain`. Confirmed algorithm outliers remain excluded at every size. Missing quantity does not change the quantity decision.
 - **Maximum support-trend distance:** reject a trade more than 10 bp from a sufficiently supported, bracketed robust local trend, regardless of quantity. Configure the boundary through a slider or exact input. Set input spread units per bp explicitly: 1 for bp, 0.01 for percentage points, or 0.0001 for decimal rates. An unsupported trend cannot trigger this rule.
+- **Require a verified cap check for fitting:** optionally exclude trades whose cap cannot be assessed. Enable with the distance rule when every fitting row must have reliable support within the cap. Unverified trades receive zero fitting weight and a separate status; this can reduce coverage around gaps, endpoints and genuine transitions.
 
 The DataFrame API accepts `quantity_col="your_column"`. Enable rules using `FilterConfig(quantity_rule=True, quantity_threshold=1_000_000, quantity_multiplier=1, max_deviation_rule=True, max_deviation_bps=10, spread_units_per_bp=1)`. Omitting the switches preserves the original three-column behavior. The public notebook contains a synthetic `Quantity` column with both small and large trades.
 

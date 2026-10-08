@@ -160,3 +160,38 @@ def test_policy_limit_uses_configured_bp_conversion_and_avoids_duplicate_baselin
     assert len(limits) == 2
     np.testing.assert_allclose(limits[0].y, [1.175] * 3)
     np.testing.assert_allclose(limits[1].y, [1.025] * 3)
+
+
+def test_retained_outside_nearby_cap_is_explicitly_unchecked_and_strict_exclusion_is_distinct():
+    # TEST LOGIC: An unreliable diagnostic at120 does not pass the100±10 cap; separate marker classes and original evidence survive duplicate index labels.
+    reviewed = _review(pd.date_range("2026-10-01T14:00Z", periods=4, freq="min"))
+    reviewed["spread"] = [110., 120., 111., 120.]
+    reviewed["jf_status"] = ["retained_uncertain", "retained_uncertain", "policy_outlier", "unverified_support"]
+    reviewed["jf_algorithm_status"] = ["insufficient_history"] * 4
+    reviewed["jf_is_outlier"] = [False, False, True, False]
+    reviewed["jf_fit_eligible"] = [True, True, False, False]
+    reviewed["jf_support_trend"] = 100.
+    reviewed["jf_support_distance_bps"] = [10., 20., 11., 20.]
+    reviewed["jf_support_reliable"] = [True, False, True, False]
+    reviewed["jf_support_reason"] = ["reliable_two_sided_support", "protected_transition", "reliable_two_sided_support", "protected_transition"]
+    reviewed["jf_policy_cap_assessed"] = [True, False, True, False]
+    reviewed["jf_policy_cap_status"] = ["within_limit", "no_reliable_support", "exceeded", "no_reliable_support"]
+    reviewed["jf_policy_cap_reason"] = ["within_10bp", "protected_transition", "exceeds_10bp", "protected_transition"]
+    reviewed.index = [7, 7, 7, 7]
+    reviewed.attrs["jump_filter"] = {"config": {"quantity_rule": True, "max_deviation_rule": True, "max_deviation_bps": 10., "spread_units_per_bp": 1.}}
+    original = reviewed.copy(deep=True)
+    figure = trade_figure(reviewed)
+    checked = next(trace for trace in figure.data if trace.name == "Retained · within cap")
+    unchecked = next(trace for trace in figure.data if trace.name == "Retained · cap unchecked")
+    unverified = next(trace for trace in figure.data if trace.name == "Unverified · excluded")
+    assert list(checked.y) == [110.] and checked.marker.symbol == "circle-open"
+    assert list(unchecked.y) == [120.] and unchecked.marker.symbol == "square-open"
+    assert list(unverified.y) == [120.] and unverified.marker.symbol == "square-open"
+    assert unverified.marker.color != unchecked.marker.color
+    assert unchecked.customdata[0][15:19].tolist() == ["insufficient_history", "protected_transition", "no_reliable_support", "protected_transition"]
+    assert "Cap assessment" in unchecked.hovertemplate and "Original algorithm" in unchecked.hovertemplate
+    residuals = next(trace for trace in figure.data if trace.name == "Residual")
+    assert list(residuals.marker.symbol) == ["circle-open", "square-open", "x", "square-open"]
+    limits = [trace for trace in figure.data if trace.name == "10 bp limit"]
+    assert all(np.isnan(trace.y[1]) and np.isnan(trace.y[3]) for trace in limits)
+    pd.testing.assert_frame_equal(reviewed, original)

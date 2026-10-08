@@ -126,7 +126,7 @@ def _method_mathematics(method, pending_config, applied_method=None):
                  ("session_open", "Regular weekday session opening time."), ("session_close", "Regular weekday session closing time."),
                  ("holidays", "Explicit full-day closures; supply session_schedule for a complete custom calendar.")]]
     records += [(name, str(pending_config[name]), PARAMETER_HELP.get(name, "Enable this optional final selection rule")) for name in
-                ["quantity_rule", "quantity_threshold", "quantity_multiplier", "max_deviation_rule", "max_deviation_bps", "spread_units_per_bp"]]
+                ["quantity_rule", "quantity_threshold", "quantity_multiplier", "max_deviation_rule", "require_cap_support", "max_deviation_bps", "spread_units_per_bp"]]
     st.dataframe(pd.DataFrame(records, columns=["parameter", "pending value", "effect"]), width="stretch", hide_index=True)
     title, url = card["reference"]
     st.markdown(f"Reference: [{title}]({url})")
@@ -149,6 +149,8 @@ def _metrics(rows):
         for column, (label, value) in zip(st.columns(6), labels):
             column.metric(label, value)
     st.caption(f'Final fit eligible: {stats["fit_eligible"]:,} · explicitly retained uncertain: {stats["retained_uncertain"]:,} · original algorithm flags: {stats["algorithm_outliers"]:,} · small suspicious exclusions: {stats["quantity_rejected"]:,} · support-trend cap exclusions: {stats["max_deviation_rejected"]:,}. Assessed flag rate excludes unassessed policy decisions.')
+    if stats["cap_enabled"]:
+        st.caption(f'Distance cap: {stats["cap_assessed"]:,} assessed · {stats["cap_unassessed"]:,} unchecked because support is unreliable · {stats["retained_cap_unassessed"]:,} retained uncertain without a cap check · {stats["support_unverified"]:,} excluded by the strict support gate. Dashed limits apply only at trades with reliable support; nearby limits do not certify an unchecked trade.')
     return stats
 
 
@@ -170,6 +172,10 @@ def _table(frame, *, height="auto"):
                   jf_algorithm_reason="Algorithm reason", jf_algorithm_is_outlier="Algorithm outlier", jf_quantity="Normalized notional",
                   jf_quantity_notional="Normalized notional", jf_quantity_valid="Valid Quantity", jf_support_trend="Independent support trend",
                   jf_support_reliable="Reliable support", jf_support_residual="Support-trend residual", jf_support_distance_bps="Support distance · bp")
+    labels.update(cap_enabled="Distance cap enabled", cap_assessed="Cap assessed", cap_unassessed="Cap unchecked · no reliable support",
+                  retained_cap_unassessed="Retained uncertain · cap unchecked", jf_policy_cap_status="Distance-cap assessment",
+                  jf_policy_cap_assessed="Cap assessed", jf_policy_cap_reason="Cap reason", jf_support_reason="Support reason",
+                  support_unverified="Strict support gate exclusions", jf_policy_support_unverified="Strict support gate applied")
     config = {name: st.column_config.Column(labels.get(name, name.replace("_", " ").capitalize())) for name in frame.columns}
     for name in ["coverage", "flagged_rate", "flag_rate", "hard_retention"]:
         if name in frame:
@@ -306,9 +312,11 @@ def main():
         quantity_multiplier = st.selectbox("Quantity units", [1., 1000., 1000000.], format_func=lambda value: {1.: "Raw amount · 1MM = 1,000,000", 1000.: "Thousands · 1MM = 1,000", 1000000.: "Millions · 1MM = 1"}[value], disabled=not quantity_rule)
         quantity_threshold = _parameter("quantity_threshold", "Small-trade threshold · notional amount", 1000000., 1., 10000000., 10000., disabled=not quantity_rule)
         max_deviation_rule = st.checkbox("Enable maximum support-trend deviation", value=False)
+        require_cap_support = st.checkbox("Require a verified cap check for fitting", value=False, disabled=not max_deviation_rule,
+                                          help="Exclude trades without a reliable distance-cap check from hard and soft fitting, without calling them outliers. Coverage can fall at segment endpoints, sparse periods and liquidity changes.")
         max_deviation_bps = _parameter("max_deviation_bps", "Maximum trend deviation · bp", 10., .1, 100., .1, disabled=not max_deviation_rule)
         spread_units_per_bp = st.selectbox("Spread numeric units", [1., .01, .0001], format_func=lambda value: {1.: "Basis points · 1 bp = 1", .01: "Percentage points · 1 bp = 0.01", .0001: "Decimal · 1 bp = 0.0001"}[value], disabled=not (quantity_rule or max_deviation_rule), help=PARAMETER_HELP["spread_units_per_bp"])
-        st.caption("Small Quantity alone does not exclude a trade. Weak evidence plus suspicious deviation can exclude a small trade; otherwise known positive Quantity retains it explicitly as uncertain. Confirmed algorithm outliers stay excluded at every size. Independent support prefers separate left/right trends; disagreement disables the cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. Units are explicit; the display label never converts values.")
+        st.caption("Small Quantity alone does not exclude a trade. Weak evidence plus suspicious deviation can exclude a small trade; otherwise known positive Quantity retains it explicitly as uncertain. Confirmed algorithm outliers stay excluded at every size. Independent support prefers separate left/right trends; disagreement disables the cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. An unchecked retained trade has not passed the cap and may lie beyond nearby limits. Enable Require a verified cap check for fitting to exclude unverified trades from hard and soft fitting. Units are explicit; the display label never converts values.")
         if method == "causal_ewma" and (quantity_rule or max_deviation_rule):
             st.caption("Optional screening uses centered future support, so final policy decisions are retrospective even when the original EWMA algorithm is causal.")
     # FILE IO LOGIC: Preserve the uploaded authoritative intervals and their identity with each successful review.
@@ -327,7 +335,8 @@ def main():
                           session_timezone=session_timezone, session_open=session_open, session_close=session_close,
                           holidays=tuple(value.strip() for value in holidays_text.split(",") if value.strip()),
                           quantity_rule=quantity_rule, quantity_threshold=quantity_threshold, quantity_multiplier=quantity_multiplier,
-                          max_deviation_rule=max_deviation_rule, max_deviation_bps=max_deviation_bps, spread_units_per_bp=spread_units_per_bp, **config_values)
+                          max_deviation_rule=max_deviation_rule, require_cap_support=require_cap_support and max_deviation_rule,
+                          max_deviation_bps=max_deviation_bps, spread_units_per_bp=spread_units_per_bp, **config_values)
     with st.sidebar.container(key="jf-apply"):
         applied = st.button("Apply filter", type="primary", width="stretch")
         st.caption("Edits stay pending until you apply. Exports retain the applied settings.")
@@ -412,13 +421,13 @@ def main():
         figure = cached_chart[1]
         review["chart_metadata"] = figure.layout.meta
         st.plotly_chart(figure, width="stretch")
-        st.caption("Red crosses mark final outlier exclusions, including optional policies. Gray open circles are unscored; amber open circles are explicitly retained uncertain and fit eligible; amber open diamonds mark unresolved transitions. Hover for exact evidence and reasons. Original spreads are preserved.")
+        st.caption("Red crosses mark final outlier exclusions. Gray open circles are unscored; gray open squares are unverified trades excluded from fitting by the strict support gate. With the cap enabled, amber open circles are retained uncertain within the verified cap; amber open squares are retained uncertain without a reliable cap check. Amber open diamonds mark unresolved transitions. Hover for the cap assessment, support reason and original algorithm evidence.")
         if figure.layout.meta.get("sampled"):
             counts = figure.layout.meta
             st.caption(f'Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports use every reviewed trade.')
         with st.expander("How to read this review"):
             st.write("The shaded band is the method's statistical deviation cutoff around its diagnostic baseline. When enabled, dashed outlines show the separate support-trend distance cap, default ±10 bp. Session boundaries, configured gap breaks and missing usable references interrupt the paths and shading. These bands are screening cutoffs, not confidence intervals.")
-            st.write("Gray open circles are unscored and not fit eligible by default; amber open diamonds are unresolved transitions. Amber open circles are explicitly retained uncertain by the Quantity policy and are fit eligible. Their inclusion is a selection decision, not certification that the trade is clean.")
+            st.write("Gray open circles are unscored and not fit eligible by default; amber open diamonds are unresolved transitions. Retained uncertain trades are fit eligible under the Quantity policy. With the cap enabled, amber circles passed a reliable cap check; amber squares have no reliable support, so the cap abstained. These unchecked points can lie beyond limits drawn for nearby trades. The strict support gate excludes unverified rows from both fitting selections and marks them with gray open squares; it can reduce coverage in sparse periods or at segment endpoints.")
             st.write("Historical screening can use future trades. CUSIP, time and spread identify statistical deviations; they cannot establish retail origin, distress, markup or commission. The baseline is a diagnostic reference, not an observed market mid.")
     with math_tab:
         _method_mathematics(method, pending_config, review["config"].method)
@@ -449,6 +458,9 @@ def main():
         if "policy_reasons" in audits:
             _section("Optional policy decisions", "Final selection reasons are separate from the preserved algorithm status and reason.")
             _table(audits["policy_reasons"])
+        if "cap_assessment" in audits:
+            _section("Distance-cap assessment and support reasons", "Within limit is a passed reliable check. No reliable support is an abstention, and retention follows the other enabled decisions.")
+            _table(audits["cap_assessment"])
         st.caption("Flag rate uses evaluated records. Invalid and insufficient-history records remain in the audit table and exports.")
         support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
                            "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
@@ -485,6 +497,7 @@ def main():
         preferred += ["jf_algorithm_status", "jf_algorithm_reason", "jf_algorithm_is_outlier", "jf_quantity", "jf_quantity_notional", "jf_quantity_valid",
                       "jf_support_trend", "jf_support_reliable", "jf_support_reason", "jf_support_residual", "jf_support_distance_bps",
                       "jf_support_distance_tolerance_bps", "jf_policy_suspicious_source", "jf_policy_retained_uncertain"]
+        preferred += ["jf_policy_cap_assessed", "jf_policy_cap_status", "jf_policy_cap_reason", "jf_policy_support_unverified"]
         _table(shown[[name for name in dict.fromkeys(preferred) if name in shown]].head(2000), height=440)
         if len(shown) > 2000:
             st.caption(f"Showing the first 2,000 of {len(shown):,} matching records. Download annotations for every reviewed row.")

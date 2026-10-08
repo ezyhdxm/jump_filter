@@ -48,6 +48,25 @@ Defaults use `spread_units_per_bp=1` for observations already in bp. Percentage-
 
 Without a reliable reference, the distance rule abstains and the other decisions continue to apply. Both optional rules can use later trades through the centered support trend. Enabling them with `causal_ewma` therefore makes the **final policy decision** potentially noncausal while preserving the original causal algorithm audit.
 
+### Why a retained point can appear outside the limit
+
+The dashed limits are defined only where the trade has reliable support. A neighboring line segment cannot certify a point inside a support hole. Quantity screening may retain a sparse or transition trade even when its cap has **not been assessed**. A finite distance to an unreliable diagnostic bridge also does not constitute a passed cap check. For example, a genuine 100-to-130 bp level step can produce a 115 bp midpoint and a 15 bp diagnostic residual: rejecting it against that unsupported midpoint would remove legitimate repricing.
+
+Every policy review now publishes `jf_policy_cap_assessed`, `jf_policy_cap_status` and `jf_policy_cap_reason`. Outcomes distinguish `disabled`, `not_actionable`, `no_reliable_support`, `within_limit` and `exceeded`. The charts distinguish uncertain trades **within the cap** from uncertain trades with an **unchecked cap**, and show the support reason in the hover. The dashboard and per-CUSIP summaries report assessed caps, cap abstentions, retained unchecked trades and strict verification exclusions separately.
+
+### Require a verified cap check for fitting
+
+Enable **Require a verified cap check for fitting** (`require_cap_support=True`) together with `max_deviation_rule=True` when your fitting sample must satisfy the distance criterion. This additional switch defaults off to preserve the original uncertainty policy. In strict mode, unverified support prevents fitting at every quantity; a detected cap violation still becomes a policy outlier. Formerly unflagged unverified records receive `unverified_support`, `jf_fit_eligible=False` and weight zero. A confirmed original algorithm outlier retains its flag and status, but also gets zero weight if its cap is unverified. Neither hard nor soft fitting includes these rows. The original evidence remains in `jf_algorithm_*`.
+
+Writing \(H_i\) for the original/policy fitting choice, \(A_i\) for a reliable cap assessment and \(D\) for the configured bp limit, the optional verified sample obeys
+
+\[
+\mathcal D_{\rm verified}
+=\{i:H_i=1,\ A_i=1,\ d_i^{\rm bp}\le D+\epsilon_i\},
+\]
+
+where \(\epsilon_i\) is the recorded allowance for eight source-value ULPs. Thus a retained fitting row must have a verified distance, rather than merely an absent violation flag. No trend is invented across a gap. Coverage can fall at segment endpoints, sparse/liquidity periods and protected transitions; these records remain auditable as unverified, without inferring bad execution.
+
 ## API and dashboard
 
 ```python
@@ -69,6 +88,8 @@ review = filter_trades(df, controls, quantity_col="trade_notional")
 ```
 
 The notebook and browser expose independent enable switches, a quantity-column selector, quantity-unit controls, and synchronized sliders with exact inputs for both boundaries. Changes remain pending until Apply. Method comparisons and exports use the applied quantity mapping and settings.
+
+For a fitting sample with verified cap coverage, add `require_cap_support=True` to the configuration above. With both distance controls enabled, every returned hard-fitting row has `jf_policy_cap_assessed=True` and a distance at or below the configured limit, allowing the recorded roundoff tolerance.
 
 `jf_fit_eligible` is the final hard-fitting decision. Original algorithm status and final retained/excluded counts are reported separately. Explicit uncertain retention can improve fitting coverage, but must not increase the reported fraction of statistically evaluated trades. Use the policy reason and support diagnostics to audit each override.
 

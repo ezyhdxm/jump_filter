@@ -244,17 +244,31 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
             rows.get("jf_support_trend", pd.Series(np.nan, index=rows.index)),
             rows["jf_support_distance_bps"],
             rows.get("jf_support_reliable", pd.Series(False, index=rows.index)).astype(str),
+            rows.get("jf_algorithm_status", rows["jf_status"]),
+            rows.get("jf_support_reason", pd.Series("not_recorded", index=rows.index)),
+            rows.get("jf_policy_cap_status", pd.Series("not_recorded", index=rows.index)),
+            rows.get("jf_policy_cap_reason", pd.Series("not_recorded", index=rows.index)),
         ))
         hover_text = hover_text.replace("<extra></extra>",
             "<br>Quantity (notional) %{customdata[11]:,.0f}<br>Policy support trend %{customdata[12]:.4f} " + unit +
-            "<br>Distance to support %{customdata[13]:.3f} bp · Reliable support %{customdata[14]}<extra></extra>")
+            "<br>Distance to support %{customdata[13]:.3f} bp · Reliable support %{customdata[14]}" +
+            "<br>Original algorithm %{customdata[15]}<br>Support reason %{customdata[16]}" +
+            "<br>Cap assessment %{customdata[17]}<br>Cap reason %{customdata[18]}<extra></extra>")
+    # PLOTTING LOGIC: A retained trade without a reliable cap check must not look like a verified within-limit trade.
+    # Trick: Older annotations can lack the explicit cap audit; reliable support supplies a display-only fallback without changing any fitting decision.
     evaluated = rows["jf_status"].isin(["ok", "outlier", "provisional_jump"])
     ambiguous = rows["jf_status"].eq("ambiguous_transition")
     retained = rows["jf_status"].eq("retained_uncertain")
+    unverified = rows["jf_status"].eq("unverified_support")
+    cap_enabled = bool(policy_config.get("max_deviation_rule", False))
+    cap_assessed = rows.get("jf_policy_cap_assessed", rows.get("jf_support_reliable", pd.Series(False, index=rows.index))).fillna(False)
+    retained_unchecked = retained & cap_enabled & ~cap_assessed
     classes = [
         ("Evaluated", ~rows["jf_is_outlier"] & evaluated, TEAL, "circle", 5.5),
-        ("Unscored", ~rows["jf_is_outlier"] & ~evaluated & ~ambiguous & ~retained, MUTED, "circle-open", 7),
-        ("Retained · uncertain", retained & ~rows["jf_is_outlier"], AMBER, "circle-open", 7),
+        ("Unscored", ~rows["jf_is_outlier"] & ~evaluated & ~ambiguous & ~retained & ~unverified, MUTED, "circle-open", 7),
+        ("Retained · within cap" if cap_enabled else "Retained · uncertain", retained & ~retained_unchecked & ~rows["jf_is_outlier"], AMBER, "circle-open", 7),
+        ("Retained · cap unchecked", retained_unchecked & ~rows["jf_is_outlier"], AMBER, "square-open", 8),
+        ("Unverified · excluded", unverified & ~rows["jf_is_outlier"], MUTED, "square-open", 8),
         ("Ambiguous turn", ambiguous, AMBER, "diamond-open", 9),
         ("Outlier", rows["jf_is_outlier"], RED, "x", 10),
     ]
@@ -298,7 +312,7 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
     # PLOTTING LOGIC: The residual plot uses the engine's raw-unit diagnostic without recomputing it.
     figure.add_trace(go.Scattergl(x=rows["jf_time"], y=rows["jf_residual"], mode="markers", name="Residual", showlegend=False,
                                  marker=dict(color=np.where(rows["jf_is_outlier"], RED, np.where(ambiguous | retained, AMBER, np.where(evaluated, TEAL, MUTED))),
-                                             symbol=np.where(rows["jf_is_outlier"], "x", np.where(retained, "circle-open", "circle")), size=np.where(rows["jf_is_outlier"], 8, 4.5), opacity=.85),
+                                             symbol=np.where(rows["jf_is_outlier"], "x", np.where(unverified | retained_unchecked, "square-open", np.where(retained, "circle-open", "circle"))), size=np.where(rows["jf_is_outlier"], 8, 4.5), opacity=.85),
                                  customdata=hover, hovertemplate=hover_text.replace("Spread", "Residual")), row=2, col=1)
     figure.add_hline(y=0, line_color=MUTED, line_width=1, line_dash="dot", row=2, col=1)
     figure.add_trace(go.Scatter(x=band_time, y=raw_cutoff, mode="lines", showlegend=False,

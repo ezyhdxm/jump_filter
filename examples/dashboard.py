@@ -67,6 +67,10 @@ _ = panel.run()
 # reject any size. Missing quantity leaves the algorithm decision unchanged.
 # The maximum-distance rule needs a bracketed local trend with sufficient support;
 # it does not construct evidence across a gap or infer a trend where none exists.
+# Enable **Require a verified cap check for fitting** (require_cap_support=True)
+# alongside the cap to exclude unverified rows from both hard and soft fitting.
+# Unverified support remains distinct from confirmed outliers. The plot and audits
+# distinguish retained trades within the cap from retained trades with no cap check.
 # Original algorithm evidence and the final fitting decision are both exported.
 # The engine preserves original rows and index; flags and reasons are added.
 #

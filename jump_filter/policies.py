@@ -145,6 +145,33 @@ def _cap_exceeds(result, config):
     return result["jf_support_distance_bps"] > config.max_deviation_bps + roundoff
 
 
+def _cap_evidence(result, config, actionable):
+    # Input: cap enabled,actionable=[True,True,False],reliable=[True,False,True],
+    # distances=[12,20,0]bp,limit10 -> Output: assessed=[True,False,False],
+    # exceeds=[True,False,False].
+    # Trick: a finite diagnostic bridge with unreliable support is not a cap test.
+    # CORE LOGIC: STEP 1 — Record which rows actually receive the distance test.
+    assessed = config.max_deviation_rule & actionable & result["jf_support_reliable"]
+    exceeds = assessed & _cap_exceeds(result, config)
+    result["jf_policy_cap_assessed"] = assessed
+
+    # Input: same rows, support reasons=['reliable_two_sided_support',
+    # 'protected_transition','reliable_two_sided_support'] -> Output: statuses=
+    # ['exceeded','no_reliable_support','not_actionable'],reasons=
+    # ['support_trend_max_deviation_exceeded','protected_transition','algorithm_state_not_actionable'].
+    # Trick: disabled is explicit; unassessed never means a passed 10bp check.
+    # CORE LOGIC: STEP 2 — Publish the cap outcome separately from the fitting choice.
+    status = np.full(len(actionable), "disabled", dtype=object)
+    reason = np.full(len(actionable), "maximum_deviation_rule_disabled", dtype=object)
+    if config.max_deviation_rule:
+        status[:] = np.where(actionable, "no_reliable_support", "not_actionable")
+        reason[:] = np.where(actionable, result["jf_support_reason"], "algorithm_state_not_actionable")
+        status[assessed], reason[assessed] = "within_limit", "support_trend_within_max_deviation"
+        status[exceeds], reason[exceeds] = "exceeded", "support_trend_max_deviation_exceeded"
+    result["jf_policy_cap_status"], result["jf_policy_cap_reason"] = status, reason
+    return exceeds
+
+
 def apply_policies(result, frame, data, utc_times, config, quantity_col, backend):
     """Apply explicit decision rules after scoring, preserving original evidence."""
     # Input: algorithm status=['ok','insufficient_history'],flags=[False,False],
@@ -189,28 +216,41 @@ def apply_policies(result, frame, data, utc_times, config, quantity_col, backend
     # Input: weak=[True,True,True],known=[True,True,False],small=[True,False,False],
     # suspicious=[True,True,True],distance=[10,10.01,20]bp,reliable=[True,True,False],
     # both rules on -> Output: quantity_reject=[True,False,False],
-    # max_deviation=[False,True,False],retained_uncertain=[False,False,False].
+    # actionable=[True,True,True],max_deviation=[False,True,False],
+    # rejected=[True,True,False].
     # Trick: both boundaries are strict: exactly 1MM is large and exactly 10bp stays.
     # Invalid/outside-session/failed-solver states cannot receive either override.
     # CORE LOGIC: STEP 4
     actionable = np.isin(status, ("ok", "outlier", "insufficient_history", "ambiguous_transition", "provisional_jump"))
     quantity_reject = config.quantity_rule & weak & small & suspicious
-    deviation = config.max_deviation_rule & actionable & result["jf_support_reliable"] & _cap_exceeds(result, config)
-    retained = config.quantity_rule & weak & known & ~quantity_reject & ~deviation
+    deviation = _cap_evidence(result, config, actionable)
     rejected = quantity_reject | deviation
 
-    # Input: quantity_reject=[True,False],deviation=[False,False],retained=[False,True]
+    # Input: strict cap support enabled,actionable=[True,True,True],
+    # reliable=[True,False,False],rejected=[False,False,True],Quantity rule enabled,
+    # weak/known all True ->
+    # Output: unverified=[False,True,False],retained=[True,False,False].
+    # Trick: the optional verification gate takes precedence over Quantity retention;
+    # without an enabled cap it has no effect. Missing support is not outlier evidence.
+    # CORE LOGIC: STEP 5 — Separate uncertifiable fitting rows from detected violations.
+    unverified = config.max_deviation_rule & config.require_cap_support & actionable & ~result["jf_support_reliable"] & ~rejected
+    retained = config.quantity_rule & weak & known & ~rejected & ~unverified
+
+    # Input: quantity_reject=[True,False],deviation=[False,False],retained=[False,True],
+    # unverified=[False,False],both quantities valid
     # -> Output: reasons=['small_quantity_suspicious','quantity_uncertain_retained'].
     # Trick: the absolute cap takes precedence when both optional rules reject a row.
-    # CORE LOGIC: STEP 5
+    # CORE LOGIC: STEP 6
     reason = np.full(len(frame), "no_override", dtype=object)
     reason[config.quantity_rule & weak & ~known] = "quantity_unknown_no_override"
     reason[retained] = "quantity_uncertain_retained"
     reason[quantity_reject] = "small_quantity_suspicious"
     reason[deviation] = "support_trend_max_deviation_exceeded"
+    reason[unverified] = "support_trend_unverified_for_fitting"
     result.update(jf_policy_small_quantity=small, jf_policy_suspicious=suspicious,
                   jf_policy_quantity_rejected=quantity_reject, jf_policy_max_deviation=deviation,
-                  jf_policy_retained_uncertain=retained, jf_policy_reason=reason)
+                  jf_policy_retained_uncertain=retained, jf_policy_support_unverified=unverified,
+                  jf_policy_reason=reason)
 
     # Input: algorithm statuses=['insufficient_history','provisional_jump','invalid_input'],
     # quantity_reject=[True,False,False],retained=[False,True,False] ->
@@ -218,10 +258,21 @@ def apply_policies(result, frame, data, utc_times, config, quantity_col, backend
     # flags=[True,False,False],fit_eligible=[False,True,False],weights=[0,1,0].
     # Trick: explicit retained uncertainty is a fitting choice, not a clean statistical
     # label. Mandatory policy exclusions also receive zero soft-fitting weight.
-    # CORE LOGIC: STEP 6
+    # CORE LOGIC: STEP 7
     result["jf_status"][rejected], result["jf_status"][retained] = "policy_outlier", "retained_uncertain"
     result["jf_is_outlier"][rejected], result["jf_is_outlier"][retained] = True, False
     result["jf_fit_eligible"][rejected], result["jf_fit_eligible"][retained] = False, True
     result["jf_weight"][rejected], result["jf_weight"][retained] = 0.0, 1.0
     changed = rejected | retained
     result["jf_reason"][changed] = reason[changed]
+
+    # Input: statuses=['insufficient_history','outlier'],flags=[False,True],
+    # weights=[0,.2],fit_eligible=[False,False],unverified=[True,True] -> Output: statuses=
+    # ['unverified_support','outlier'],flags=[False,True],fit_eligible=[False,False],
+    # weights=[0,0],reasons both 'support_trend_unverified_for_fitting'.
+    # Trick: an original outlier remains an outlier; zero weight also prevents its
+    # inclusion by soft fitting. Original algorithm evidence stays in the snapshots.
+    # CORE LOGIC: STEP 8 — Enforce optional verification in both fitting policies.
+    result["jf_status"][unverified & ~result["jf_is_outlier"]] = "unverified_support"
+    result["jf_fit_eligible"][unverified], result["jf_weight"][unverified] = False, 0.0
+    result["jf_reason"][unverified] = reason[unverified]
