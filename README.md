@@ -13,7 +13,28 @@ python -m pip install -e '.[dashboard,app,parquet]'
 python -m streamlit run jump_filter/app.py
 ```
 
-Open **jump_filter_dashboard.ipynb** for the notebook dashboard, or use the browser dashboard with a synthetic demonstration or CSV upload. Both provide CUSIP and nine-method selection, paired sliders and exact inputs, plots, red outlier markers, reference bands, statistics, method comparisons and exports. **Method & mathematics** explains each algorithm in Chinese with formulas, numeric examples, parameter effects and limits; it follows the selected method immediately. Local diagnostics show reference density, span, gaps and the method's noise scale. Apply publishes a reproducible snapshot; pending settings do not silently alter downloads.
+Open **jump_filter_dashboard.ipynb** for the notebook dashboard, or use the browser dashboard with a synthetic demonstration or CSV upload. Both provide CUSIP and nine-method selection, paired sliders and exact inputs, plots, red outlier markers, reference bands, statistics, method comparisons and exports. **Method & mathematics** explains each algorithm in English with formulas, numeric examples, parameter effects and limits; it follows the selected method immediately. Local diagnostics show reference density, span, gaps and the method's noise scale. Apply publishes a reproducible snapshot; pending settings do not silently alter downloads.
+
+## Run inside Jupyter Notebook
+
+The notebook dashboard uses native `ipywidgets` controls and Plotly `FigureWidget` charts. It runs inside Jupyter Notebook 7 or JupyterLab 4, with no Streamlit server required. Install the notebook extra in the environment that will run both Jupyter and the kernel:
+
+```bash
+# SETUP LOGIC: install the notebook frontend, kernel and native chart dependencies.
+python -m pip install -e '.[notebook]'
+# SETUP LOGIC: register this environment without writing a separate user-level kernel.
+python -m ipykernel install --sys-prefix --name jump-filter --display-name "Jump Filter"
+# UI LOGIC: open the supplied dashboard notebook in Jupyter Notebook.
+python -m notebook jump_filter_dashboard.ipynb
+```
+
+Select the **Jump Filter** kernel and run all cells. For JupyterLab, use `python -m jupyterlab jump_filter_dashboard.ipynb` instead. The dashboard appears in a notebook output cell; CUSIP selection, method selection, sliders, exact inputs, Apply, comparison, mathematics, statistics and exports all work there.
+
+If you already have a notebook environment, run `%pip install -e '.[dashboard]'` from the repository directory **in that notebook**, restart its kernel and run all cells. `%pip` installs into the active kernel. If the frontend and kernel use different environments, install `jupyterlab_widgets` and `anywidget` in the frontend environment, and the dashboard extra in the kernel environment. The notebook extra includes all of these. Plotly 6 uses `anywidget` for native charts.
+
+Reopen the notebook and run all cells when starting a new session; live controls depend on a running kernel. Full standalone HTML charts remain available through Export for viewing without a kernel.
+
+The fresh-install browser check used Python 3.13, Notebook 7.6.3, JupyterLab 4.6.4, ipykernel 7.4.0, ipywidgets 8.1.9, anywidget 0.11.0 and Plotly 7.1.0. It verified bond/method selection, paired parameter controls, Apply, native charts, mathematical explanations and method comparison inside Notebook. The test suite also executes the supplied notebook in an actual Jupyter kernel.
 
 ## DataFrame API
 
@@ -124,4 +145,4 @@ python -m pytest -q
 
 See [all nine mathematical explanations](docs/MATHEMATICS.md), [offline solver details](docs/OFFLINE_METHODS.md) and [research references](docs/RESEARCH.md). See [historical fitting validation](docs/VALIDATION.md) for measured results, coverage, reproducibility and limits. Synthetic precision/recall are evidence about the included scenarios, not real bond-trade accuracy.
 
-中文：Notebook 和浏览器支持九种方法、完整数学解释、slider + 输入框、交易日历、异常与不确定转向标记、流动性诊断和统计导出。11 个模拟 bond 包括上行后下行、突降、流动性变化与真实休市 gap。历史拟合可用未来交易；用 `select_fit_data` 明确控制硬筛除或软降权，并在真实数据上校准。
+The eleven synthetic bonds include continuous turns, abrupt drops, changing liquidity and genuine market-closure gaps. Historical screening can use future trades. Choose hard exclusion or soft influence explicitly with `select_fit_data`, and calibrate parameters on real observations.

@@ -175,13 +175,15 @@ def test_fixed_downstream_fit_recovers_linear_path_after_rejecting_target():
     np.testing.assert_allclose(fit, 100 + 0.5 * np.arange(20), atol=1e-10)
 
 
-# TEST LOGIC: A support-breaking gap must not acquire a fictitious bridge fitted from distant data.
-def test_fixed_downstream_fit_reports_short_postgap_segment_as_missing():
+# TEST LOGIC: A support-breaking gap must remain separate for every supported pandas timestamp resolution.
+@pytest.mark.parametrize("timestamp_unit", ["s", "ms", "us", "ns"])
+def test_fixed_downstream_fit_reports_short_postgap_segment_as_missing(timestamp_unit):
     frame = pd.DataFrame({
         "time": pd.date_range("2025-01-01", periods=9, freq="h", tz="UTC"),
         "spread": np.r_[np.full(6, 100.0), np.full(3, 120.0)],
     })
     frame.loc[6:, "time"] += pd.Timedelta("10D")
+    frame["time"] = frame["time"].dt.as_unit(timestamp_unit)
     fit = downstream_fit(frame, np.ones(9, dtype=bool))
     np.testing.assert_allclose(fit[:6], 100.0)
     assert np.isnan(fit[6:]).all()

@@ -9,8 +9,10 @@ description = "Auditable robust bond spread outlier screening and interactive da
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "pandas>=2.2"]
 
+# CONFIGURATION LOGIC: Notebook widgets use bundled Plotly assets; the complete notebook extra also installs the server and kernel.
 [project.optional-dependencies]
-dashboard = ["plotly>=5.18", "ipywidgets>=8", "ipython>=8", "nbformat>=5.9"]
+dashboard = ["plotly>=6", "anywidget>=0.9", "ipywidgets>=8", "ipython>=8", "nbformat>=5.9"]
+notebook = ["plotly>=6", "anywidget>=0.9", "ipywidgets>=8", "ipython>=8", "nbformat>=5.9", "ipykernel>=6.29", "jupyterlab>=4", "notebook>=7", "jupyterlab_widgets>=3"]
 app = ["streamlit>=1.50", "plotly>=5.18"]
 parquet = ["pyarrow>=12"]
 dev = ["pytest>=8", "nbclient>=0.10", "build>=1"]

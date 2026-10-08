@@ -58,19 +58,19 @@ def _method_mathematics(method, pending_config, applied_method=None):
         st.write(prose)
         for block in math_display_blocks(formula):
             st.latex(block)
-    st.markdown("**Numeric example / 数值例子**")
+    st.markdown("**Numeric example**")
     st.write(card["example"])
-    st.markdown("**Assumptions and limits / 假设与局限**")
+    st.markdown("**Assumptions and limits**")
     st.write(card["tradeoffs"])
-    st.markdown("**Selected parameters / 当前待应用参数**")
+    st.markdown("**Selected parameters / pending settings**")
     records = [(name, str(pending_config[name]), PARAMETER_HELP[name]) for name in card["parameters"]]
     records += [(name, str(pending_config[name]), explanation) for name, explanation in
-                [("horizon", "真实时间距离限制；multiscale 使用其 1、2、4 倍。"),
-                 ("max_gap", "超过此 inactivity gap 独立分段，任何方法都不跨段借用参考。"),
-                 ("time_basis", "trading = 累计开市时间；wall = 日历时间。"),
-                 ("session_timezone", "交易 session 时区，与原始 naive timestamps 的解析时区分别配置。"),
-                 ("session_open", "常规工作日 session 开始时间。"), ("session_close", "常规工作日 session 结束时间。"),
-                 ("holidays", "显式整日休市；完整特殊 calendar 可通过 API session_schedule 输入。")]]
+                [("horizon", "Reference-time distance limit; multiscale uses 1, 2 and 4 times this value."),
+                 ("max_gap", "Split after this much inactivity in the selected clock; references never cross segments."),
+                 ("time_basis", "Trading uses cumulative open-session time; wall uses calendar time."),
+                 ("session_timezone", "Market session timezone, configured separately from parsing naive input timestamps."),
+                 ("session_open", "Regular weekday session opening time."), ("session_close", "Regular weekday session closing time."),
+                 ("holidays", "Explicit full-day closures; supply session_schedule for a complete custom calendar.")]]
     st.dataframe(pd.DataFrame(records, columns=["parameter", "pending value", "effect"]), width="stretch", hide_index=True)
     title, url = card["reference"]
     st.markdown(f"Reference: [{title}]({url})")
@@ -160,7 +160,7 @@ def main():
     mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, timezone=zone)
     method = st.sidebar.selectbox("Method", METHODS, format_func=lambda name: METHOD_LABELS[name], index=list(METHODS).index("consensus"))
     st.sidebar.caption(METHOD_HELP[method])
-    st.sidebar.caption("离线历史筛选可使用后续交易；Causal EWMA 仅作在线比较。无关参数已禁用。")
+    st.sidebar.caption("Historical screening can use future trades. Causal EWMA is an online comparator. Parameters unused by the selected method are disabled.")
     config_values = {}
     relevant = METHOD_EXPLANATIONS[method]["parameters"]
     # UI LOGIC: Hyperparameter values are shared between the exact input and its slider.
@@ -184,7 +184,7 @@ def main():
         horizon = st.text_input("Reference horizon", "3D", help="Pandas duration, for example 6h or 3D. In trading mode this means cumulative open-session time.")
         max_gap = st.text_input("Session break gap", "1D", help="Split after this much inactive elapsed time in the selected clock. Trading mode removes configured market closures.")
     with st.sidebar.expander("Trading calendar and liquidity gaps", expanded=False):
-        time_basis = st.selectbox("Distance clock", ["trading", "wall"], format_func=lambda value: "Trading time / 开市累计时间" if value == "trading" else "Wall clock / 日历时间")
+        time_basis = st.selectbox("Distance clock", ["trading", "wall"], format_func=lambda value: "Trading time / cumulative open-session time" if value == "trading" else "Wall clock / calendar time")
         use_schedule = st.checkbox("Use authoritative session schedule CSV", disabled=time_basis == "wall")
         schedule_upload = st.file_uploader("Session schedule · open / close timestamps", type=["csv"], disabled=not use_schedule or time_basis == "wall", help="Each row defines one open interval; open and close (or session_open and session_close) require timezone-aware timestamps, e.g. 2026-11-27T08:00:00-05:00,2026-11-27T13:00:00-05:00. Supplied intervals override regular weekday hours and holidays.")
         regular_disabled = time_basis == "wall" or use_schedule
@@ -192,7 +192,7 @@ def main():
         session_open = st.text_input("Weekday session opens", "08:00", disabled=regular_disabled)
         session_close = st.text_input("Weekday session closes", "18:30", disabled=regular_disabled)
         holidays_text = st.text_input("Closed dates · YYYY-MM-DD, ...", "", disabled=regular_disabled, help="Comma-separated full-session closures. A configured weekday schedule is a research assumption; holidays and early closes are not automatically inferred.")
-        st.caption("Trading mode 压缩 scheduled overnight、weekend 和显式 holidays；开市时没有成交的 gap 仍保留。局部 trend 使用选定时钟，图仍显示真实 UTC。完整特殊 calendar 可通过 API session_schedule 输入。")
+        st.caption("Trading time removes scheduled overnight, weekend and explicit holiday closures. No-trade gaps during open sessions remain. Local trends use the selected clock; plots show actual UTC timestamps. Supply an authoritative session schedule for a custom calendar.")
     # FILE IO LOGIC: Preserve the uploaded authoritative intervals and their identity with each successful review.
     session_schedule, schedule_error, schedule_id = None, None, None
     if use_schedule and time_basis == "trading":
@@ -244,7 +244,7 @@ def main():
     st.caption(f'Applied source: {review["source_label"]} · {len(result):,} rows · {METHOD_LABELS[review["config"].method]} · {review["unit"]}')
     if signature != review["signature"]:
         st.warning("Pending changes. These results and downloads use the last successful Apply.")
-    st.markdown('<div class="jf-note">历史拟合可使用前后交易确认异常。Three columns identify statistical anomalies; they cannot establish retail origin, distress, markup or commission. Baselines are diagnostic references. Hard fitting uses evaluated, unflagged records; see fitting coverage and the mathematics tab.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="jf-note">Historical fitting can use earlier and later trades to assess anomalies. Three columns cannot establish retail origin, distress, markup or commission. Baselines are diagnostic references. Hard fitting uses supported, unflagged records; see fitting coverage and the mathematics tab.</div>', unsafe_allow_html=True)
     # UI LOGIC: Selector labels retain exact CUSIP values and do not hide sparse bonds.
     choices = list(result[active_cusip].dropna().drop_duplicates())
     if not choices:
@@ -266,7 +266,7 @@ def main():
     with statistics_tab:
         st.markdown("**All bonds · applied method**")
         st.dataframe(summarize(result, cusip_col=active_cusip), width="stretch", hide_index=True)
-        st.markdown("**Fitting coverage and retention / 拟合样本统计**")
+        st.markdown("**Fitting coverage and retention**")
         st.dataframe(fitting_statistics(result, cusip_col=active_cusip), width="stretch", hide_index=True)
         st.caption("Hard fit uses jf_fit_eligible (status ok and unflagged). Soft fit uses positive weights among status ok/outlier. Ambiguous transitions, provisional, invalid, unsupported and solver-failure records are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size or inverse variance.")
         st.plotly_chart(diagnostic_figure(selected, spread_col=active_spread, unit=review["unit"]), width="stretch")

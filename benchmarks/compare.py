@@ -252,8 +252,12 @@ def downstream_fit(frame: pd.DataFrame, retained: np.ndarray) -> np.ndarray:
     21 closest accepted timestamp cohorts within 3 days, 6 minimum cohorts, and never
     borrows across an adjacent gap longer than 1 day. Targets include rejected rows.
     """
-    # SETUP LOGIC: Construct calendar coordinates and reserve unsupported estimates as NaN.
-    stamps = pd.to_datetime(frame["time"], utc=True).astype("int64").to_numpy()
+    # Input: time=['1970-01-01T00:00Z','1970-01-01T01:00Z','1970-01-02T03:00Z'],spread=[100,100,120]; evaluation_hours is absent.
+    # Output: stamps=[0,3600000000000,97200000000000],hours=[0,1,27],values=[100,100,120],fitted=[NaN,NaN,NaN],segment=[0,0,1].
+    # Trick: Normalize every pandas datetime resolution to nanoseconds before dividing by a nanosecond duration.
+    # Input events are already ordered; supplied evaluation_hours instead measures the chosen trading clock.
+    # CORE LOGIC: STEP 1 — Build consistent elapsed-hour coordinates and separate unsupported gap segments.
+    stamps = pd.to_datetime(frame["time"], utc=True).dt.as_unit("ns").astype("int64").to_numpy()
     hours = frame["evaluation_hours"].to_numpy(dtype=float) if "evaluation_hours" in frame else (stamps - stamps.min()) / pd.Timedelta("1h").value
     values = frame["spread"].to_numpy(dtype=float)
     fitted = np.full(len(frame), np.nan)
@@ -262,7 +266,7 @@ def downstream_fit(frame: pd.DataFrame, retained: np.ndarray) -> np.ndarray:
     # Trick: A target's rejection never removes it from evaluation; support limits are common.
     # Input: hours=[0,1,2,3,4,5,6], target=3, retained=[True]*7.
     # Output: candidate=[0,1,2,3,4,5,6], neighbors=[3,2,4,1,5,0,6].
-    # CORE LOGIC: STEP 1 — Select the same bounded neighborhood rule for every target.
+    # CORE LOGIC: STEP 2 — Select the same bounded neighborhood rule for every target.
     for target in range(len(frame)):
         valid = retained & (segment == segment[target]) & (np.abs(hours - hours[target]) <= 72.0)
         candidate = np.flatnonzero(valid)

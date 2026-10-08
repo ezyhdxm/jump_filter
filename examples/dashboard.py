@@ -3,7 +3,13 @@
 #
 # This notebook uses generated trades to demonstrate local spread outliers,
 # genuine level changes and sparse trading. No private bond records are included.
-# Install the dashboard extra: `python -m pip install -e ".[dashboard]"`.
+# From this repository, install `python -m pip install -e ".[notebook]"` and launch
+# `python -m jupyterlab jump_filter_dashboard.ipynb` or `python -m notebook`.
+# Select the Python kernel from that environment, then choose **Run All Cells**.
+# Existing Jupyter installations can install `%pip install -e ".[dashboard]"`
+# in their kernel, restart it, and rerun this notebook. The notebook uses native
+# ipywidgets and Plotly FigureWidget with locally bundled JavaScript; no CDN or
+# separate Streamlit server is required. Controls need a live Python kernel.
 #
 # Pick a CUSIP and method, edit the sliders or exact inputs, then **Apply filter**.
 # The statistical dashboard and CSV/settings exports use the last successful Apply.
@@ -33,7 +39,7 @@ settings = FilterConfig(method="consensus", window=31, horizon="3D", max_gap="1D
 # UI LOGIC: All algorithm settings can be changed through sliders and exact input boxes.
 panel = show_filter(data, config=settings, cusip_col="CUSIP", time_col="time",
                     spread_col="spread", timezone="UTC", unit="bp")
-panel.run()
+_ = panel.run()
 
 # %% [markdown]
 # ## Use your own dataframe

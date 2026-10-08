@@ -163,7 +163,7 @@ Inspect the selected bond's raw trades, local reference, threshold band, flagged
 
 Parameter controls are deliberately interpretable: a larger deviation threshold reduces sensitivity; a larger time/window neighborhood offers more support but can blur changing regimes; a larger floor reduces sensitivity to tiny moves and quantized spreads; a longer persistence requirement delays recognition of a new causal regime. There is no general parameter setting that removes all retail execution effects while retaining every true market change.
 
-中文使用提示：这里标记的是“可能不适合拟合局部中心 spread 的交易”，不能仅凭三列判断它一定是 retail、commission 或 desperate trade。图中的 baseline 是稳健的局部参考，不是真实 mid。`consensus` 依赖后续交易确认回归，适合历史研究；`causal_ewma` 严格使用过去信息，但真实跳变最初几笔也可能暂时被排除。调整 `abs_floor` 前先确认 spread 的单位，并同时查看 coverage、protected shift 和 abstention。
+Interpret flags as trades that may be unsuitable for fitting a local central spread. Three columns cannot establish retail origin, a commission, or distressed execution. The plotted baseline is a robust diagnostic reference, not an observed mid. `consensus` uses later trades to confirm reversion and is intended for historical research. `causal_ewma` uses past information, but can temporarily reject the first prints of a genuine jump. Check spread units before adjusting `abs_floor`, and assess coverage, protected shifts and abstention together.
 
 ## References
 

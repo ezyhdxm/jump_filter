@@ -118,8 +118,21 @@ def _kpi_html(stats):
     return '<div class="jf-kpis">' + ''.join(f'<div class="jf-kpi"><strong>{value}</strong><span>{label}</span></div>' for label, value in items) + '</div>'
 
 
+def _notebook_figure(figure):
+    # PLOTTING LOGIC: Canonical Plotly JSON maps missing hover diagnostics to null before the widget comm is opened.
+    # Trick: Object-array NaNs can become illegal JSON primitives; numerical arrays may remain valid binary buffers.
+    # The presentation copy alone is serialized; engine results and applied-data exports retain their original values.
+    import plotly.graph_objects as go
+    return go.FigureWidget(json.loads(figure.to_json(remove_uids=False)))
+
+
 class FilterDashboard:
-    """Notebook controls with an explicit, atomically published applied result."""
+    """Live Jupyter widgets with an explicit applied result and bundled Plotly charts.
+
+    Install ``jump-filter[notebook]`` for a complete Notebook 7/JupyterLab 4 setup,
+    or ``jump-filter[dashboard]`` inside an existing Jupyter kernel. No Streamlit
+    process is required. A running kernel handles filtering and control callbacks.
+    """
 
     def __init__(self, data, *, config=None, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", unit="bp", session_schedule=None):
         # SETUP LOGIC: Copy caller data; keep optional notebook dependencies outside package imports.
@@ -133,6 +146,7 @@ class FilterDashboard:
         self.session_schedule = session_schedule.copy(deep=True) if session_schedule is not None else None
         self.applied_schedule = None
         self.comparison, self._applied_state, self.busy = None, None, False
+        self._figure_widgets, self._comparison_widget = (), None
         # VALIDATION LOGIC: Fail early for a bad mapping, before showing controls that cannot run.
         if not all(column in data for column in [cusip_col, time_col, spread_col]):
             raise ValueError("CUSIP, time and spread mappings must name existing columns.")
@@ -176,7 +190,7 @@ class FilterDashboard:
             param_cards.append(card)
         self.horizon = w.Text(value=str(self.config.horizon), description="Reference horizon (e.g. 3D)")
         self.max_gap = w.Text(value=str(self.config.max_gap), description="Session break gap (e.g. 1D)")
-        self.time_basis = w.Dropdown(options=[("Trading time / 开市累计时间", "trading"), ("Wall clock / 日历时间", "wall")], value=self.config.time_basis, description="Distance clock")
+        self.time_basis = w.Dropdown(options=[("Cumulative trading time", "trading"), ("Wall-clock time", "wall")], value=self.config.time_basis, description="Distance clock")
         self.session_timezone = w.Text(value=self.config.session_timezone, description="Market session timezone")
         self.session_open = w.Text(value=self.config.session_open, description="Weekday session opens")
         self.session_close = w.Text(value=self.config.session_close, description="Weekday session closes")
@@ -198,9 +212,9 @@ class FilterDashboard:
         for i, name in enumerate(["Trade review", "Statistical dashboard", "Method comparison", "Method & mathematics"]):
             self.tabs.set_title(i, name)
         hero = w.HTML('<div class="jf-hero"><div class="jf-eyebrow">Bond trade quality</div><h2>Jump Filter</h2><p>Review unusual trade spreads with robust local evidence. Preserve genuine spread moves and inspect the reason for every flag.</p></div>')
-        note = w.HTML('<p class="jf-help">用于历史拟合时，前后交易都可以提供证据；默认展示离线方法，Causal EWMA 是在线比较基准。CUSIP、time、spread 只能标记统计异常，不能确定 retail、distress 或 commission 的原因。Method & mathematics 可在 Apply 前查看所选方法的公式、例子和参数作用。</p>')
+        note = w.HTML('<p class="jf-help">Historical fit screening can use earlier and later trades. Offline methods are available alongside Causal EWMA as an online comparator. CUSIP, time and spread identify statistical anomalies; they cannot determine retail, distress or commission causes. Open Method &amp; mathematics to inspect equations, examples and parameter effects before applying a method.</p>')
         calendar = w.VBox([self._row(self.time_basis, self.session_timezone), self._row(self.session_open, self.session_close), self.holidays,
-                           w.HTML('<p class="jf-help">Trading time 压缩 scheduled 夜间、周末与列出的 holidays；开市期间没有成交的 gap 仍保留。Session calendar 是研究假设，需要按市场校准；horizon 与 max_gap 在 trading 模式下表示开市累计时间。图始终显示真实 UTC 时间。API 支持精确 session_schedule。</p>')])
+                           w.HTML('<p class="jf-help">Trading time compresses scheduled nights, weekends and listed holidays while retaining inactivity during open sessions. The session calendar is a configurable research assumption. In trading mode, horizon and max_gap measure cumulative open time. Charts always use actual UTC timestamps. Supply an authoritative session_schedule for exact holidays and early closes.</p>')])
         parameter_grid = w.Box(param_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
         settings = w.Accordion(children=[w.VBox([parameter_grid, self._row(self.horizon, self.max_gap)]), calendar], selected_index=None)
         settings.set_title(0, "Hyperparameters · sliders and exact inputs")
@@ -254,14 +268,14 @@ class FilterDashboard:
                 display(HTML(f'<h4>{escape(title)}</h4><p>{escape(prose)}</p>'))
                 for block in math_display_blocks(formula):
                     display(Math(block))
-            display(HTML(f'<h4>Numeric example / 数值例子</h4><p>{escape(card["example"])}</p><h4>Assumptions and limits / 假设与局限</h4><p>{escape(card["tradeoffs"])}</p>'))
+            display(HTML(f'<h4>Numerical example</h4><p>{escape(card["example"])}</p><h4>Assumptions and limitations</h4><p>{escape(card["tradeoffs"])}</p>'))
             rows = [(name, self.params[name].value, PARAMETER_HELP[name]) for name in card["parameters"]]
             rows += [("time_basis", self.time_basis.value, "Trading exposure or wall-clock distance"),
                      ("session_timezone", self.session_timezone.value, "Market calendar timezone"),
                      ("session_open", self.session_open.value, "Weekday regular open"),
                      ("session_close", self.session_close.value, "Weekday regular close"),
                      ("holidays", self.holidays.value, "Explicit full-day closures")]
-            display(HTML('<h4>Selected parameters / 当前待应用参数</h4>' + _table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"])) ))
+            display(HTML('<h4>Selected parameters</h4>' + _table_html(pd.DataFrame(rows, columns=["parameter", "pending value", "effect"])) ))
             title, url = card["reference"]
             display(HTML(f'<p class="jf-help">Reference: <a href="{escape(url, quote=True)}" target="_blank">{escape(title)}</a></p>'))
             if self.session_schedule is not None:
@@ -291,7 +305,7 @@ class FilterDashboard:
         return frame.loc[frame[self.mapping["cusip_col"]].eq(self.cusip.value)].copy()
 
     def _render(self, result):
-        # PLOTTING LOGIC: Build complete figures before publishing successful applied state.
+        # PLOTTING LOGIC: Native widget views use bundled Plotly assets, avoiding scripts inside sanitized HTML outputs.
         from .plots import trade_figure, diagnostic_figure, METHOD_LABELS
         from . import summarize
         selected = self._selected(result)
@@ -300,7 +314,7 @@ class FilterDashboard:
                               title=f'{self.cusip.value} · {METHOD_LABELS[self.applied_config.method] if self.applied_config else "Review"}')
         diagnostic = diagnostic_figure(selected, spread_col=self.mapping["spread_col"], unit=self.unit)
         summary = summarize(result, cusip_col=self.mapping["cusip_col"])
-        return selected, figure, diagnostic, summary, fitting_statistics(result, cusip_col=self.mapping["cusip_col"])
+        return selected, _notebook_figure(figure), _notebook_figure(diagnostic), summary, fitting_statistics(result, cusip_col=self.mapping["cusip_col"])
 
     def _publish(self, selected, figure, diagnostic, summary, fitting):
         # UI LOGIC: Replace output areas only after engine and plot construction both succeed.
@@ -309,13 +323,13 @@ class FilterDashboard:
         with self.chart:
             self.chart.clear_output(wait=True)
             display(HTML('<p class="jf-help">All timed finite trades for this bond are drawn. Red crosses are statistical outliers; amber markers are level changes or provisional jumps.</p>'))
-            display(HTML(figure.to_html(full_html=False, include_plotlyjs="inline")))
+            display(figure)
         with self.statistics:
             self.statistics.clear_output(wait=True)
             display(HTML('<h4>All bonds · applied method</h4>' + _table_html(summary)))
             display(HTML('<h4>All bonds · fitting coverage and retention</h4>' + _table_html(fitting)))
             display(HTML('<p class="jf-help">Hard fit: jf_fit_eligible / status ok and unflagged. Soft fit: status ok or outlier with positive suggested influence weight. Provisional jumps, ambiguous transitions, invalid inputs, unsupported rows and solver failures are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size.</p>'))
-            display(HTML(diagnostic.to_html(full_html=False, include_plotlyjs="inline")))
+            display(diagnostic)
             audits = audit_tables(selected)
             display(HTML('<h4>Selected bond · observed daily support</h4>' + _table_html(audits["daily"])))
             display(HTML('<h4>Selected bond · flag and support reasons</h4>' + _table_html(audits["reasons"])))
@@ -323,6 +337,11 @@ class FilterDashboard:
                                "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
             display(HTML('<h4>Selected bond · liquidity and local uncertainty diagnostics</h4>' + _table_html(selected[[name for name in support_columns if name in selected]])))
             display(HTML('<h4>Selected bond · trade audit</h4>' + _table_html(selected)))
+        # UI LOGIC: Keep live plot models referenced and close superseded views after publishing replacements.
+        previous_widgets = self._figure_widgets
+        self._figure_widgets = (figure, diagnostic)
+        for previous_widget in previous_widgets:
+            previous_widget.close()
 
     def run(self, _=None):
         """Apply the settings to every supplied row and retain a successful snapshot."""
@@ -343,6 +362,7 @@ class FilterDashboard:
             self.result, self._applied_state, self.comparison = result, self._state(), None
             self.applied_schedule = schedule
             self.method_output.clear_output()
+            self._clear_comparison_widget()
             self.status.value = f'<div class="jf-status">Applied {escape(config.method)} to {len(result):,} supplied rows. Charts focus on {escape(str(self.cusip.value))}.</div>'
         except Exception as exc:
             self.applied_config = previous
@@ -359,6 +379,13 @@ class FilterDashboard:
         self._publish(*self._render(self.result))
         self.comparison = None
         self.method_output.clear_output()
+        self._clear_comparison_widget()
+
+    def _clear_comparison_widget(self):
+        # UI LOGIC: Closed comparison models cannot retain stale applied settings in the notebook frontend.
+        if self._comparison_widget is not None:
+            self._comparison_widget.close()
+            self._comparison_widget = None
 
     def compare(self, _=None):
         # UI LOGIC: Compare explicitly using the applied settings, even when new edits are pending.
@@ -370,12 +397,14 @@ class FilterDashboard:
         self._lock(True)
         try:
             table = method_comparison(self._selected(self.data), self.applied_config, **self.mapping, session_schedule=self.applied_schedule)
-            figure = comparison_figure(table)
+            figure = _notebook_figure(comparison_figure(table))
             with self.method_output:
                 self.method_output.clear_output(wait=True)
                 display(HTML('<p class="jf-help">Same selected bond, same applied hyperparameters. Differences measure sensitivity, not accuracy. Centered and causal methods use different information sets.</p>'))
-                display(HTML(figure.to_html(full_html=False, include_plotlyjs="inline")))
+                display(figure)
                 display(HTML(_table_html(table)))
+            self._clear_comparison_widget()
+            self._comparison_widget = figure
             self.comparison = table
             self.tabs.selected_index = 2
         except Exception as exc:
@@ -423,7 +452,11 @@ class FilterDashboard:
 
 
 def show_filter(data, **kwargs):
-    """Construct and display a notebook dashboard; call .run() to apply settings."""
+    """Display the complete dashboard inside Jupyter; call .run() to apply settings.
+
+    Return a FilterDashboard with native ipywidgets/Plotly views, including method
+    explanations, mathematical formulas, statistics and applied-data exports.
+    """
     # UI LOGIC: Return the workbench so callers can inspect its applied result and exports.
     from IPython.display import display
     panel = FilterDashboard(data, **kwargs)
