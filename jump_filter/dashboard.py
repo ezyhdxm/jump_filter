@@ -22,6 +22,9 @@ STYLE = """
 .jf-workbench .widget-output,.jf-workbench .jp-OutputArea,.jf-workbench .jp-OutputArea-child,.jf-workbench .jp-OutputArea-output,.jf-workbench .output_subarea,.jf-workbench .widget-subarea,.jf-workbench .jf-figure{width:100%!important;max-width:100%;min-width:0}.jf-workbench .jf-figure{display:block!important}.jf-workbench .jp-RenderedMath,.jf-workbench mjx-container[display="true"]{max-width:100%;overflow-x:auto}.jf-workbench .MathJax_Display{max-width:100%;overflow-x:auto;text-align:left!important}
 @media(max-width:760px){.jf-workbench{padding:14px}.jf-workbench .jf-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.jf-workbench .jf-hero h2{font-size:26px}.jf-workbench .jf-hero-top{align-items:flex-start}.jf-workbench .jf-hero-top .jf-badge{font-size:10px}.jf-workbench .widget-tab-contents{padding:10px}.jf-workbench .jf-param{flex-basis:100%}}
 .jf-workbench .jupyter-widget-Collapse-header{background:white;border:1px solid var(--jf-line);border-radius:7px;color:var(--jf-ink);padding:11px 13px;font-size:12px;font-weight:650}.jf-workbench .jupyter-widget-Collapse-contents{background:white;border:1px solid var(--jf-line);border-top:0;padding:15px;border-radius:0 0 7px 7px}.jf-workbench .widget-tab .p-TabBar-tab,.jf-workbench .widget-tab .lm-TabBar-tab{flex:0 0 auto!important;min-width:0!important;width:auto!important;max-width:none!important;padding:10px 14px!important;border:0!important;background:transparent!important;color:var(--jf-muted)!important;font-size:12px!important;font-weight:650!important}.jf-workbench .widget-tab .p-TabBar-tab.p-mod-current,.jf-workbench .widget-tab .lm-TabBar-tab.lm-mod-current{background:white!important;color:var(--jf-teal)!important;border-bottom:2px solid var(--jf-teal)!important}.jf-workbench .widget-tab .p-TabBar-tabLabel,.jf-workbench .widget-tab .lm-TabBar-tabLabel{white-space:nowrap!important;overflow:visible!important;text-overflow:clip!important}
+.jf-workbench .jf-policy-controls>.jf-control{flex:0 0 auto}
+.jf-workbench .jf-policy-toggle{flex:0 0 auto;width:100%;min-height:34px;display:flex;align-items:center}
+.jf-workbench .jf-policy-toggle>.widget-label-basic{width:auto!important;overflow:visible;white-space:normal}
 """
 
 # PLOTTING LOGIC: Decorate the bundled Plotly module using anywidget's supported factory and lifecycle hooks.
@@ -442,9 +445,12 @@ class FilterDashboard:
         self.holidays = w.Text(value=", ".join(self.config.holidays), description="Closed dates · YYYY-MM-DD, ...")
         self._calendar_controls = [self.time_basis, self.session_timezone, self.session_open, self.session_close, self.holidays]
         self._controls = [self.method, self.scope, self.horizon, self.max_gap, *self._calendar_controls, *self.params.values(), *self._policy_controls]
-        for control in [self.cusip, self.cusip_search, self.scope, self.method, self.horizon, self.max_gap, self.export_path, *self._calendar_controls, self.quantity_rule, self.quantity_col, self.quantity_multiplier, self.max_deviation_rule, self.spread_units_per_bp]:
+        for control in [self.cusip, self.cusip_search, self.scope, self.method, self.horizon, self.max_gap, self.export_path, *self._calendar_controls, self.quantity_col, self.quantity_multiplier, self.spread_units_per_bp]:
             control.add_class("jf-control")
             control.style.description_width = "initial"
+        # UI LOGIC: Native checkboxes retain their horizontal label/input structure, separate from vertically labeled text controls.
+        for control in [self.quantity_rule, self.max_deviation_rule]:
+            control.add_class("jf-policy-toggle")
         # UI LOGIC: CUSIP selection changes the view only; parameter edits await explicit Apply.
         self.cusip.observe(self._focus_changed, names="value")
         self.cusip_search.observe(self._search_bonds, names="value")
@@ -463,8 +469,10 @@ class FilterDashboard:
                            w.HTML('<p class="jf-help">Trading time compresses scheduled nights, weekends and listed holidays while retaining inactivity during open sessions. The session calendar is a configurable research assumption. In trading mode, horizon and max_gap measure cumulative open time. Charts always use actual UTC timestamps. Supply an authoritative session_schedule for exact holidays and early closes.</p>')])
         parameter_grid = w.Box(param_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
         policy_grid = w.Box(policy_cards, layout=w.Layout(display="flex", flex_flow="row wrap")).add_class("jf-row")
+        # UI LOGIC: Vertical policy controls use their natural heights; wrapping rows retain the shared horizontal flex sizing.
+        # Trick: A 230px flex basis means height inside VBox, so override it only for this panel's direct control children.
         policies = w.VBox([self.quantity_rule, self._row(self.quantity_col, self.quantity_multiplier), self.max_deviation_rule,
-                           self.spread_units_per_bp, policy_grid, w.HTML('<p class="jf-help">Both rules are optional. Small trades are excluded only with suspicious evidence. Known positive Quantity can retain weak-evidence records explicitly as retained uncertain; confirmed algorithm outliers remain excluded at every size. Independent support follows separate left/right trends where both sides have enough references; disagreement disables the hard cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. No Quantity or spread units are inferred from labels.</p>')])
+                           self.spread_units_per_bp, policy_grid, w.HTML('<p class="jf-help">Both rules are optional. Small trades are excluded only with suspicious evidence. Known positive Quantity can retain weak-evidence records explicitly as retained uncertain; confirmed algorithm outliers remain excluded at every size. Independent support follows separate left/right trends where both sides have enough references; disagreement disables the hard cap. Only insufficient side counts allow a bracketed whole-neighborhood fallback. No Quantity or spread units are inferred from labels.</p>')]).add_class("jf-policy-controls")
         settings = w.Accordion(children=[w.VBox([parameter_grid, self._row(self.horizon, self.max_gap)]), calendar, policies], selected_index=None)
         settings.set_title(0, "Tune detection · relevant parameters and exact values")
         settings.set_title(1, "Trading calendar · sessions, closures and gaps")
