@@ -3,16 +3,19 @@
 #
 # This notebook uses generated trades to demonstrate local spread outliers,
 # genuine level changes and sparse trading. No private bond records are included.
-# From this repository, install `python -m pip install -e ".[notebook]"` and launch
+# From this repository, install `python -m pip install -e ".[notebook,speed]"` and launch
 # `python -m jupyterlab jump_filter_dashboard.ipynb` or `python -m notebook`.
 # Select the Python kernel from that environment, then choose **Run All Cells**.
-# Existing Jupyter installations can install `%pip install -e ".[dashboard]"`
+# Existing Jupyter installations can install `%pip install -e ".[dashboard,speed]"`
 # in their kernel, restart it, and rerun this notebook. The notebook uses native
 # ipywidgets and Plotly FigureWidget with locally bundled JavaScript; no CDN or
 # separate Streamlit server is required. Controls need a live Python kernel.
 #
 # Pick a CUSIP and method, edit the sliders or exact inputs, then **Apply filter**.
 # The statistical dashboard and CSV/settings exports use the last successful Apply.
+# Selected bond is the default review population. Choose All bonds · batch and
+# Apply explicitly for complete-source annotations and portfolio statistics.
+# CUSIP revisits reuse a bounded cache; changing methods stays pending until Apply.
 # **Method & mathematics** immediately follows your selected method, even before Apply.
 # It renders formulas, numerical examples, parameter effects and failure/coverage rules.
 # Historical fit screening may use both earlier and later trades; Causal EWMA is an
@@ -66,8 +69,10 @@ _ = panel.run()
 # in the notebook dashboard. Applied settings export its fingerprint and the
 # authoritative schedule CSV for reproducibility.
 #
-# `panel.result` contains the applied annotated dataframe. The Export button saves
-# complete annotations, bond statistics, settings and an offline interactive chart.
+# `panel.result` contains the applied review population: the selected bond by
+# default, or the full source after All bonds · batch Apply. The Export button saves
+# complete annotations for that population, bond statistics, settings and a chart.
+# Large charts report a bounded display sample; filtering uses the full population.
 # **Compare methods for this bond** uses the applied settings; flag counts alone
 # do not establish filtering accuracy.
 
@@ -83,4 +88,4 @@ soft_fit = select_fit_data(panel.result, policy="soft")
 # REPORTING LOGIC: Hard fit keeps jf_fit_eligible with weight 1; soft fit exposes jf_fit_weight.
 # Unsupported/invalid/provisional/ambiguous-transition/solver-failure rows are excluded.
 # Soft weights limit influence; they are neither probabilities nor inverse variances.
-print(f"Supplied: {len(data):,}; hard-fit candidates: {len(hard_fit):,}; soft-fit candidates: {len(soft_fit):,}")
+print(f"Source: {len(data):,}; applied review: {len(panel.result):,}; hard-fit candidates: {len(hard_fit):,}; soft-fit candidates: {len(soft_fit):,}")

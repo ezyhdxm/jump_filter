@@ -44,30 +44,109 @@ def _style(figure, *, height=520, trade=False):
     return figure
 
 
-def _band_coordinates(rows, max_gap):
-    # PLOTTING LOGIC: Insert drawing breaks across inactive sessions without adding or modifying trade records.
-    coordinates = [[], [], [], [], []]
-    previous, gap = None, pd.Timedelta(max_gap)
-    for _, row in rows.iterrows():
-        timestamp, baseline, cutoff = row["jf_time"], row["jf_baseline"], row["jf_threshold"]
-        if previous is not None and (timestamp - previous > gap or bool(row.get("jf_session_boundary", False))):
-            for values in coordinates:
-                values.append(None)
-        for values, value in zip(coordinates, [timestamp, baseline, baseline + cutoff, baseline - cutoff, cutoff]):
-            values.append(value)
-        previous = timestamp
+def _drawing_breaks(rows, max_gap):
+    # Input: times=['2026-10-01T14:00Z','2026-10-01T14:01Z','2026-10-02T14:00Z'], boundaries=[False,False,True],max_gap='1D'.
+    # Output: drawing breaks=[False,False,True].
+    # Trick: A session boundary breaks the path even when its wall-clock gap is shorter than max_gap; the first row never starts with a separator.
+    # CORE LOGIC: STEP 1 — Find actual path breaks before reducing the drawing population.
+    stamps = rows["jf_time"].dt.as_unit("ns").array.asi8
+    boundaries = rows.get("jf_session_boundary", pd.Series(False, index=rows.index)).fillna(False).to_numpy(dtype=bool)
+    breaks = boundaries.copy()
+    breaks[1:] |= np.diff(stamps) > pd.Timedelta(max_gap).value
+    if len(breaks):
+        breaks[0] = False
+    return breaks
+
+
+def _band_coordinates(rows, max_gap, *, session_breaks=None):
+    # Input: rows times=['2026-10-01T14:00Z','2026-10-02T14:00Z'],baseline=[100,101],threshold=[1,2],session_breaks=[False,True].
+    # Output: times=[Oct1 14:00UTC,None,Oct2 14:00UTC], baseline=[100,NaN,101], upper=[101,NaN,103], lower=[99,NaN,99], cutoff=[1,NaN,2].
+    # Trick: Drawing separators are not trade records. Numeric NaNs serialize as null; source-row identifiers never change.
+    # CORE LOGIC: STEP 1 — Allocate one separator at each real closure or inactive gap.
+    breaks = _drawing_breaks(rows, max_gap) if session_breaks is None else session_breaks
+    positions = np.arange(len(rows)) + np.cumsum(breaks)
+    size = len(rows) + int(np.sum(breaks))
+    timestamps = np.full(size, None, dtype=object)
+    timestamps[positions] = rows["jf_time"].to_numpy(dtype=object)
+    baseline, cutoff = rows["jf_baseline"].to_numpy(dtype=float), rows["jf_threshold"].to_numpy(dtype=float)
+    # PLOTTING LOGIC: Vectorized assignment avoids constructing a pandas Series for every displayed trade.
+    coordinates = [timestamps]
+    for values in (baseline, baseline + cutoff, baseline - cutoff, cutoff):
+        drawn = np.full(size, np.nan)
+        drawn[positions] = values
+        coordinates.append(drawn)
     return coordinates
 
 
-def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp", title=None, max_gap="1D"):
-    """Show every timed trade, algorithm flags, baseline and signed residual."""
+def _extrema_positions(values, limit):
+    # Input: values=[0,9,1,8,2,7],limit=4 -> Output: positions=[0,1,2,5].
+    # Trick: The first/last records and bucket minima/maxima retain spikes and corners; ties select the earliest original position. This is display sampling, never fitting data.
+    # CORE LOGIC: STEP 1 — Budget endpoints and deterministic interior extrema.
+    count = len(values)
+    if count <= limit:
+        return np.arange(count)
+    if limit <= 3:
+        return np.array([0, count - 1])[:limit]
+    buckets = max(1, (limit - 2) // 2)
+    edges = np.linspace(1, count - 1, buckets + 1, dtype=int)
+    selected = [0, count - 1]
+    # Input: interior bucket values=[9,1,8,2] at positions1..4 -> Output: selected=[0,5,2,1], sorted unique=[0,1,2,5].
+    # Trick: Every bucket is nonempty because downsampling is only entered when the count exceeds the budget.
+    # CORE LOGIC: STEP 2 — Select actual trade positions without inventing aggregated spreads.
+    for left, right in zip(edges[:-1], edges[1:]):
+        bucket = values[left:right]
+        selected.extend([left + int(np.argmin(bucket)), left + int(np.argmax(bucket))])
+    return np.unique(selected)
+
+
+def _display_positions(rows, values, max_points):
+    # CONFIGURATION LOGIC: None explicitly requests the complete interactive chart; bounded charts require a useful positive budget.
+    if max_points is not None and (isinstance(max_points, bool) or not isinstance(max_points, int) or max_points < 4):
+        raise ValueError("max_points must be None or an integer of at least 4")
+    # Input: flags=[False,False,True,False],statuses=['ok','ok','outlier','ok'],regime=[False,False,False,False],max_points=4 -> Output: positions=[0,1,2,3].
+    # Trick: Small bonds keep every record. Review markers use original positional identity, independently of duplicate index labels.
+    # CORE LOGIC: STEP 1 — Identify real review markers before budgeting the drawing population.
+    if max_points is None or len(rows) <= max_points:
+        return np.arange(len(rows))
+    review = rows["jf_is_outlier"].to_numpy(dtype=bool) | rows["jf_regime_change"].fillna(False).to_numpy(dtype=bool)
+    review |= rows["jf_status"].isin(["ambiguous_transition", "provisional_jump"]).to_numpy()
+    priority = np.flatnonzero(review)
+    # Input: values=[0,9,20,8,2,7],priority=[1,2,3],max_points=4 -> Output: required=[0,1,2,3,5],sampled=[1,3],positions=[0,1,3,5].
+    # Trick: Always reserve the full period's endpoints. If their union with markers exceeds the budget, markers are sampled and displayed/total counts disclose omissions.
+    # CORE LOGIC: STEP 2 — Preserve time coverage even when interior review markers consume the budget.
+    endpoints = np.array([0, len(rows) - 1])
+    required = np.union1d(priority, endpoints)
+    if len(required) > max_points:
+        interior = priority[(priority > 0) & (priority < len(rows) - 1)]
+        sampled = interior[_extrema_positions(values[interior], max_points - 2)]
+        return np.union1d(endpoints, sampled)
+    # Input: values=[0,9,20,8,2,7],required=[0,2,5],max_points=4 -> Output: background=[1,3,4],retained=[1],positions=[0,1,2,5].
+    # Trick: Min/max pairing can leave one budget slot unused; all review markers are preserved when their union with endpoints fits.
+    # CORE LOGIC: STEP 3 — Fill the remaining budget with background shape evidence.
+    background = np.setdiff1d(np.arange(len(rows)), required, assume_unique=True)
+    retained = background[_extrema_positions(values[background], max_points - len(required))]
+    return np.sort(np.concatenate((required, retained)))
+
+
+def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp", title=None, max_gap="1D", max_points=20_000):
+    """Show trade evidence within a display budget; full annotations remain intact."""
     # PLOTTING LOGIC: Sort only the display copy; exported rows retain their original order and index.
     rows = annotated.loc[annotated["jf_time"].notna()].sort_values(["jf_time", "jf_row_id"], kind="stable")
     value = pd.to_numeric(rows[spread_col], errors="coerce")
     finite = np.isfinite(value.to_numpy(dtype=float, na_value=np.nan))
     rows, value = rows.loc[finite], value.loc[finite]
+    # PLOTTING LOGIC: The algorithm and statistics always use the full source; only the drawing population is reduced.
+    total, total_flags = len(rows), int(rows["jf_is_outlier"].sum())
+    positions = _display_positions(rows, value.to_numpy(dtype=float), max_points)
+    original_breaks = _drawing_breaks(rows, max_gap)
+    prefixes = np.cumsum(original_breaks)
+    displayed_breaks = np.r_[False, np.diff(prefixes[positions]) > 0] if len(positions) else np.array([], dtype=bool)
+    rows, value = rows.iloc[positions], value.iloc[positions]
     figure = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=.14,
                            row_heights=[.7, .3], subplot_titles=("Trades, baseline & cutoff band", "Deviation from baseline"))
+    figure.update_layout(meta=dict(total_timed_trades=total, displayed_trades=len(rows),
+                                   total_outliers=total_flags, displayed_outliers=int(rows["jf_is_outlier"].sum()),
+                                   sampled=len(rows) < total, max_points=max_points))
     if rows.empty:
         # PLOTTING LOGIC: Missing chart coordinates receive an explicit empty state.
         figure.add_annotation(text="No trades with a finite spread and usable timestamp", x=.5, y=.6,
@@ -103,7 +182,7 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
                                      marker=dict(color=color, size=size, symbol=symbol, opacity=.85), showlegend=bool(mask.any()),
                                      customdata=hover[mask.to_numpy()], hovertemplate=hover_text), row=1, col=1)
     # PLOTTING LOGIC: The raw-unit cutoff band is diagnostic; line breaks preserve inactive sessions.
-    band_time, baseline, upper, lower, raw_cutoff = _band_coordinates(rows, max_gap)
+    band_time, baseline, upper, lower, raw_cutoff = _band_coordinates(rows, max_gap, session_breaks=displayed_breaks)
     figure.add_trace(go.Scatter(x=band_time, y=upper, mode="lines", line=dict(width=0),
                                name="Cutoff band", showlegend=False, hoverinfo="skip", connectgaps=False), row=1, col=1)
     figure.add_trace(go.Scatter(x=band_time, y=lower, mode="lines", line=dict(width=0),
@@ -143,11 +222,15 @@ def diagnostic_figure(annotated, *, spread_col="spread", unit="bp"):
     # PLOTTING LOGIC: Histogram counts use all finite residuals, without trimming tails.
     figure = make_subplots(rows=1, cols=2, subplot_titles=("Residual distribution", "Evaluation coverage"),
                            column_widths=[.57, .43], horizontal_spacing=.22)
-    for flag, label, color in [(False, "Unflagged diagnostic", TEAL), (True, "Flagged outlier", RED)]:
-        rows = annotated.loc[annotated["jf_is_outlier"].eq(flag)]
-        figure.add_trace(go.Histogram(x=rows["jf_residual"], name=label, marker_color=color,
-                                     opacity=.75, nbinsx=45,
-                                     hovertemplate="Residual %{x:.4f} " + unit + "<br>Trades %{y}<extra>%{fullData.name}</extra>"), row=1, col=1)
+    edges, unflagged, flagged = _residual_histograms(annotated["jf_residual"].to_numpy(dtype=float),
+                                                  annotated["jf_is_outlier"].to_numpy(dtype=bool))
+    # PLOTTING LOGIC: Send a fixed-size count table, rather than every residual, to the notebook/browser.
+    centres, widths = (edges[:-1] + edges[1:]) / 2, np.diff(edges)
+    for counts, label, color in [(unflagged, "Unflagged diagnostic", TEAL), (flagged, "Flagged outlier", RED)]:
+        figure.add_trace(go.Bar(x=centres, y=counts, width=widths, name=label, marker_color=color,
+                               opacity=.75, customdata=np.column_stack((edges[:-1], edges[1:])),
+                               hovertemplate="Residual [%{customdata[0]:.4f}, %{customdata[1]:.4f}] " + unit +
+                                             "<br>Trades %{y}<extra>%{fullData.name}</extra>"), row=1, col=1)
     # Input: jf_status=['ok','outlier','ok','insufficient_history'].
     # Output: counts={'ok':2,'outlier':1,'insufficient_history':1}.
     # Trick: Missing diagnostic fields do not become zero residuals; all statuses retain explicit counts.
@@ -164,6 +247,20 @@ def diagnostic_figure(annotated, *, spread_col="spread", unit="bp"):
     figure.update_xaxes(title_text="Trades", row=1, col=2)
     figure.update_yaxes(autorange="reversed", row=1, col=2)
     return _style(figure, height=380)
+
+
+def _residual_histograms(values, flags, *, bins=45):
+    # Input: values=[0,0,1,NaN],flags=[False,True,False,False],bins=2 -> Output: edges=[0,.5,1],finite mask=[True,True,True,False].
+    # Trick: Shared full-population edges make the two distributions comparable; missing residuals are not converted to zero.
+    # CORE LOGIC: STEP 1 — Establish a common finite-residual population and binning.
+    finite = np.isfinite(values)
+    edges = np.histogram_bin_edges(values[finite], bins=bins) if finite.any() else np.linspace(-.5, .5, bins + 1)
+    # Input: values=[0,0,1,NaN],flags=[False,True,False,False],edges=[0,.5,1] -> Output: unflagged=[1,1],flagged=[1,0].
+    # Trick: NumPy bins are [left,right), with an inclusive final right boundary; counts include every finite residual, including tails.
+    # CORE LOGIC: STEP 2 — Aggregate full-data diagnostic counts without sampling.
+    unflagged = np.histogram(values[finite & ~flags], bins=edges)[0]
+    flagged = np.histogram(values[finite & flags], bins=edges)[0]
+    return edges, unflagged, flagged
 
 
 def comparison_figure(table):

@@ -33,7 +33,9 @@ import plotly.graph_objects as go
 from jump_filter import METHODS
 assert panel.result is not None, panel.status.value
 assert panel.applied_config.method == "consensus"
-assert panel.result.index.equals(data.index)
+assert panel.applied_scope == "selected"
+assert panel.result.index.equals(data.loc[data["CUSIP"].eq(panel.cusip.value)].index)
+assert len(panel.result) < len(data)
 assert len(panel._figure_widgets) == 2
 assert all(isinstance(figure, go.FigureWidget) and len(figure.data) > 0 for figure in panel._figure_widgets)
 assert all("application/vnd.jupyter.widget-view+json" in figure._repr_mimebundle_() for figure in panel._figure_widgets)
@@ -56,12 +58,16 @@ assert panel.result is not original_result, panel.status.value
 assert panel.applied_config.method == "rolling_iqr"
 applied_result = panel.result
 
-# TEST LOGIC: Bond selection changes chart views but reuses the annotated applied dataframe.
+# TEST LOGIC: First visits review one bond and revisits reuse its cached applied dataframe.
 old_figure_ids = [figure.model_id for figure in panel._figure_widgets]
+initial_bond = panel.cusip.value
 panel.cusip.value = panel.cusip.options[1][1]
-assert panel.result is applied_result
+assert panel.result is not applied_result
+assert panel.result["CUSIP"].eq(panel.cusip.value).all()
 assert [figure.model_id for figure in panel._figure_widgets] != old_figure_ids
 assert str(panel.cusip.value) in panel._figure_widgets[0].layout.title.text
+panel.cusip.value = initial_bond
+assert panel.result is applied_result
 
 # TEST LOGIC: Invalid settings do not replace the successful applied result or its export configuration.
 panel.params["min_neighbors"].value = 60
@@ -88,9 +94,20 @@ assert len(exported) == 1, panel.status.value
 settings = json.loads((exported[0] / "settings.json").read_text())
 assert settings["config"]["method"] == "rolling_iqr"
 assert settings["selected_cusip"] == str(panel.cusip.value)
+assert settings["review_scope"] == "selected"
+assert settings["rows"] == len(panel.result) < settings["source_rows"]
 assert (exported[0] / "annotated_trades.csv").is_file()
 assert (exported[0] / "method_comparison.csv").is_file()
 assert (exported[0] / "selected_bond.html").is_file()
+
+# TEST LOGIC: The explicit batch option evaluates all rows, with complete source order retained.
+panel.scope.value = "all"
+panel.apply_button.click()
+assert panel.applied_scope == "all", panel.status.value
+assert panel.result.index.equals(data.index)
+batch_result = panel.result
+panel.cusip.value = panel.cusip.options[1][1]
+assert panel.result is batch_result
 print("Notebook dashboard callback validation passed")
 '''.replace("EXPORT_DIRECTORY", repr(str(export_directory)))
 

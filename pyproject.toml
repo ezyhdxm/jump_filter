@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jump-filter"
-version = "0.2.0"
+version = "0.3.0"
 description = "Auditable robust bond spread outlier screening and interactive dashboards"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "pandas>=2.2"]
@@ -15,6 +15,8 @@ dashboard = ["plotly>=6", "anywidget>=0.9", "ipywidgets>=8", "ipython>=8", "nbfo
 notebook = ["plotly>=6", "anywidget>=0.9", "ipywidgets>=8", "ipython>=8", "nbformat>=5.9", "ipykernel>=6.29", "jupyterlab>=4", "notebook>=7", "jupyterlab_widgets>=3"]
 app = ["streamlit>=1.50", "plotly>=5.18"]
 parquet = ["pyarrow>=12"]
+# CONFIGURATION LOGIC: Optional native compilation accelerates local screening while preserving the Python reference backend.
+speed = ["numba>=0.63", "scipy>=1.10"]
 dev = ["pytest>=8", "nbclient>=0.10", "build>=1"]
 
 [project.scripts]

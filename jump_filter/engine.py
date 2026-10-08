@@ -3,6 +3,7 @@
 # SETUP LOGIC: numerical imports; importing this module performs no I/O.
 from collections import deque
 from dataclasses import replace
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
@@ -21,6 +22,47 @@ def _parse_time(value, timezone):
         return stamp.tz_convert("UTC")
     except (ValueError, TypeError, OverflowError):
         return pd.NaT
+
+
+def _parse_times(values, timezone):
+    # Input: aware datetime column ['2025-01-01T00:00Z',NaT] with microsecond units ->
+    # Output: UTC nanosecond series ['2025-01-01T00:00Z',NaT] with positional index [0,1].
+    # Trick: typed datetime arrays need no scalar reparsing; force ns for pandas 2/3 unit parity.
+    # CORE LOGIC: STEP 1
+    if isinstance(values.dtype, pd.DatetimeTZDtype):
+        return values.reset_index(drop=True).dt.tz_convert("UTC").dt.as_unit("ns")
+    if pd.api.types.is_datetime64_dtype(values.dtype):
+        localized = values.reset_index(drop=True).dt.tz_localize(timezone, ambiguous="NaT", nonexistent="NaT")
+        return localized.dt.tz_convert("UTC").dt.as_unit("ns")
+
+    # Input: mixed values=['2025-01-01',123,'bad'],timezone='UTC' ->
+    # Output: ['2025-01-01T00:00Z',NaT,NaT] with dtype datetime64[ns,UTC].
+    # Trick: the scalar fallback preserves rejection of numeric epochs and mixed-zone/DST ambiguity.
+    # CORE LOGIC: STEP 2
+    return pd.Series([_parse_time(value, timezone) for value in values], dtype="datetime64[ns, UTC]")
+
+
+def _resolve_backend(method, backend, size):
+    # CONFIGURATION LOGIC: optional acceleration does not change filter controls or add mandatory imports.
+    if backend not in ("auto", "python", "numba"):
+        raise ValueError("backend must be 'auto', 'python' or 'numba'")
+    if backend == "python" or (backend == "auto" and size < 10000):
+        return None
+    if method not in ("hampel", "local_linear", "jump_reversion", "local_piecewise", "consensus"):
+        return None
+    try:
+        from . import accelerator
+    except (ImportError, RuntimeError) as error:
+        if backend == "numba":
+            raise ImportError("the numba backend requires jump-filter[speed]") from error
+        return None
+    return accelerator
+
+
+@lru_cache(maxsize=128)
+def _duration_ns(value):
+    # CACHEING LOGIC: immutable duration strings reuse their validated nanosecond conversion.
+    return pd.Timedelta(value).value
 
 
 def _scale(values, center, floor):
@@ -66,7 +108,7 @@ def _neighbors(times, position, config):
     # Trick: both elapsed-time and count bounds apply; target cohort is excluded.
     # CORE LOGIC: STEP 1
     target = times[position]
-    horizon = pd.Timedelta(config.horizon).value
+    horizon = _duration_ns(config.horizon)
     left_bound = np.searchsorted(times, target - horizon, side="left")
     right_bound = np.searchsorted(times, target + horizon, side="right")
     left_limit = config.window // 2
@@ -239,7 +281,7 @@ def _causal_cohort(result, rows, raw, state, history, stamp, config):
     # Output: history=[(1,100)], support=1; below min_neighbors -> abstention.
     # Trick: strictly earlier cohorts are admitted; same-time values never train their own score.
     # CORE LOGIC: STEP 1
-    horizon = pd.Timedelta(config.horizon).value
+    horizon = _duration_ns(config.horizon)
     while history and (stamp - history[0][0] > horizon or len(history) > config.window):
         history.popleft()
     values = np.array([value for _, value in history], dtype=float)
@@ -535,6 +577,138 @@ def _segment(result, data, config):
             _local_cohort(result, rows, raw, times, values, position, config)
 
 
+def _array_segment(result, rows, raw, stamps, config):
+    # Input: rows=[0,1,2],stamps=[0,0,1],raw=[100,102,101] ->
+    # Output: boundaries=[0,2,3],times=[0,1],values=[101,101].
+    # Trick: one vectorized median reduction replaces a DataFrame per timestamp while excluding full cohorts.
+    # CORE LOGIC: STEP 1
+    starts = np.r_[0, np.flatnonzero(stamps[1:] != stamps[:-1]) + 1]
+    boundaries = np.r_[starts, len(stamps)]
+    times = stamps[starts]
+    codes = np.repeat(np.arange(len(starts)), np.diff(boundaries))
+    values = pd.Series(raw).groupby(codes, sort=False).median().to_numpy(dtype=float)
+    state, history = dict(center=values[0], run=0, sign=0), deque()
+
+    # Input: method=robust_trend,min_neighbors=6,rows=[0,1],raw=[100,101],stamps=[0,1] ->
+    # Output: row statuses=['insufficient_history','insufficient_history'],weights=[0,0],
+    # baselines=[NaN,NaN],reference counts=[0,0]; the two-cohort segment cannot support the solver.
+    # Trick: the joint optimization path stays unchanged; local methods use array slices below.
+    # CORE LOGIC: STEP 2
+    if config.method == "robust_trend":
+        data = pd.DataFrame(dict(row=rows, value=raw, stamp=stamps))
+        _trend_segment(result, list(data.groupby("stamp", sort=True)), times, values, config)
+        return
+
+    # Input: boundaries=[0,2,3],position=0 -> Output: selected rows=[0,1],raw=[100,102].
+    # Trick: slices are views of sorted private arrays; original frame/index objects are not mutated.
+    # CORE LOGIC: STEP 3
+    for position, stamp in enumerate(times):
+        selected = slice(boundaries[position], boundaries[position + 1])
+        cohort_rows, cohort_raw = rows[selected], raw[selected]
+        _, _, neighbors = _neighbors(times, position, config)
+        _reference_diagnostics(result, cohort_rows, times[neighbors])
+        result["jf_n_reference"][cohort_rows] = len(neighbors)
+
+        # Input: method=hampel,times=[0,1,2,3,4]ns,values=[100,100,130,100,100],position=2,
+        # rows=[2],raw=[130],window=4,horizon='1s',min_neighbors=4,threshold=4.5,abs_floor=1 ->
+        # Output: row2 baseline=100,scale=2/9,score=135,cutoff=1,residual=30,
+        # status='outlier',reason='hampel_threshold_exceeded',weight=1/30,reference count=4.
+        # Trick: only storage/preparation changed; each fallback dispatch uses the established numerical helper.
+        # CORE LOGIC: STEP 4
+        if config.method == "causal_ewma":
+            _causal_cohort(result, cohort_rows, cohort_raw, state, history, stamp, config)
+        elif config.method == "rolling_iqr":
+            _iqr_cohort(result, cohort_rows, cohort_raw, times, values, position, config)
+        elif config.method == "multiscale":
+            _multiscale_cohort(result, cohort_rows, cohort_raw, times, values, position, config)
+        else:
+            _local_cohort(result, cohort_rows, cohort_raw, times, values, position, config)
+
+
+def _bulk_groups(result, data, utc_times, config, accelerator):
+    # Input: sorted IDs=[A,A,B],stamps=[0,1,5],rows=[2,0,1] ->
+    # Output: rows=[2,0,1],same_id=[False,True,False],gaps=[NaN,1/60e9,NaN] minutes.
+    # Trick: gaps are computed only within a bond; shuffled/duplicate source indexes remain positional.
+    # CORE LOGIC: STEP 1
+    rows = data["row"].to_numpy(dtype=int)
+    stamps = data["stamp"].to_numpy(dtype=np.int64)
+    raw = data["value"].to_numpy(dtype=float)
+    ids = data["id"].to_numpy()
+    same_id = np.r_[False, ids[1:] == ids[:-1]]
+    selected_gaps = np.r_[np.nan, np.diff(stamps).astype(float) / 60e9]
+    wall_gaps = np.r_[np.nan, np.diff(utc_times[rows]).astype(float) / 60e9]
+    selected_gaps[~same_id], wall_gaps[~same_id] = np.nan, np.nan
+
+    # Input: selected gaps=[NaN,1],wall gaps=[NaN,3691],max_gap=10min ->
+    # Output: boundary=[False,True],segment starts=[0],segment ends=[2].
+    # Trick: a market closure is audited separately; only the configured clock gap splits references.
+    # CORE LOGIC: STEP 2
+    result["jf_gap_minutes"][rows] = selected_gaps
+    result["jf_wall_gap_minutes"][rows] = wall_gaps
+    result["jf_session_boundary"][rows] = np.isfinite(wall_gaps) & (wall_gaps > selected_gaps + 1e-9)
+    segment_start = ~same_id | (selected_gaps > pd.Timedelta(config.max_gap).value / 60e9)
+    boundaries = np.r_[np.flatnonzero(segment_start), len(rows)]
+
+    # Input: backend=python,segment boundaries=[0,2,3] ->
+    # Output: independent array segments rows[0:2] and rows[2:3] enter the reference helpers.
+    # Trick: unsupported methods keep the same solver/reference algorithm with cheaper preparation.
+    # CORE LOGIC: STEP 3
+    if accelerator is None:
+        for begin, end in zip(boundaries[:-1], boundaries[1:]):
+            _array_segment(result, rows[begin:end], raw[begin:end], stamps[begin:end], config)
+        return
+
+    # Input: stamps=[0,0,1,0],segment starts=[True,False,False,True] ->
+    # Output: cohort starts=[0,2,3],row cohorts=[0,0,1,2],cohort medians=[101,103,110] for raw=[100,102,103,110].
+    # Trick: identical clock values on different bonds/segments are never combined into one cohort.
+    # CORE LOGIC: STEP 4
+    cohort_start = segment_start | np.r_[False, stamps[1:] != stamps[:-1]]
+    cohort_rows = np.flatnonzero(cohort_start)
+    row_cohorts = np.cumsum(cohort_start) - 1
+    values = pd.Series(raw).groupby(row_cohorts, sort=False).median().to_numpy(dtype=float)
+    times = stamps[cohort_rows]
+    segment_cohorts = row_cohorts[boundaries[:-1]]
+    segment_ends = np.r_[segment_cohorts[1:], len(times)]
+    lengths = segment_ends - segment_cohorts
+
+    # Input: times=[0,1,5]ns,values=raw=[100,101,110],row_cohorts=[0,1,2],segment cohort
+    # starts=[0,2],ends=[2,3],method=hampel,window=4,horizon='1s',min_neighbors=4 ->
+    # Output: per-cohort starts=[0,0,2],ends=[2,2,3]; audit shape=(3,14),column6=[1,1,0],
+    # columns0..4/11..12 allNaN,columns5/7..10/13 all0 (every row has insufficient support).
+    # Trick: amortize compilation/dispatch across all CUSIPs instead of crossing Python per bond/cohort.
+    # CORE LOGIC: STEP 5
+    starts = np.repeat(segment_cohorts, lengths)
+    ends = np.repeat(segment_ends, lengths)
+    audit = accelerator.local_kernel(times, values, starts, ends, row_cohorts, raw,
+        accelerator.LOCAL_METHODS.index(config.method), config.window, pd.Timedelta(config.horizon).value,
+        config.min_neighbors, config.threshold, config.abs_floor, config.reversion_tolerance)
+
+    # Input: row IDs=[2,0],audit baselines=[100,101],status codes=[2,1] ->
+    # Output: source row2 baseline=100,status='outlier';source row0 baseline=101,status='ok'.
+    # Trick: private integer transport codes restore every original string/boolean audit field explicitly.
+    # CORE LOGIC: STEP 6
+    fields = ("jf_baseline", "jf_scale", "jf_score", "jf_threshold", "jf_residual", "jf_weight",
+              "jf_n_reference", "jf_is_outlier", "jf_regime_change")
+    for position, name in enumerate(fields):
+        result[name][rows] = audit[:, position]
+    result["jf_status"][rows] = accelerator.STATUS_NAMES[audit[:, 9].astype(int)]
+    result["jf_reason"][rows] = accelerator.REASON_NAMES[audit[:, 10].astype(int)]
+    result["jf_reference_span_minutes"][rows] = audit[:, 11]
+    result["jf_reference_density_per_hour"][rows] = audit[:, 12]
+
+    # Input: row cohorts=[0,1,1,2],retry markers=[0,1,0,0] ->
+    # Output: cohort1's two raw trades are recomputed once by the original Python/SVD helpers.
+    # Trick: rounding-near decisions use the established exact solver without changing cutoffs or audit reasons.
+    # CORE LOGIC: STEP 7
+    retry_cohorts = np.unique(row_cohorts[audit[:, 13] > 0])
+    row_ends = np.r_[cohort_rows[1:], len(rows)]
+    for position in retry_cohorts:
+        selected = slice(cohort_rows[position], row_ends[position])
+        begin, end = starts[position], ends[position]
+        result["jf_regime_change"][rows[selected]] = False
+        _local_cohort(result, rows[selected], raw[selected], times[begin:end], values[begin:end], position - begin, config)
+
+
 def _local_cohort(result, rows, raw, times, values, position, config):
     # Input: values=[100,100,130,100,100],position=2,min_neighbors=4,
     # method=hampel,window=4,horizon=1s,threshold=4.5,abs_floor=1 ->
@@ -547,6 +721,22 @@ def _local_cohort(result, rows, raw, times, values, position, config):
         _piecewise_cohort(result, rows, raw, refs, config)
     else:
         _assign(result, rows, raw, refs, config)
+
+
+def _compiled_groups(result, data, utc_times, config, accelerator, backend):
+    # Input: backend='auto',compiler raises a NumbaError before publishing scores ->
+    # Output: all segments are scored by Python and actual backend=None;
+    # backend='numba' with that error -> Output: the compiler error is raised.
+    # Trick: only recognized compiler errors trigger fallback; numerical/domain errors remain visible.
+    # CORE LOGIC: STEP 1
+    try:
+        _bulk_groups(result, data, utc_times, config, accelerator)
+    except (accelerator.COMPILATION_ERROR, ImportError):
+        if backend == "numba":
+            raise
+        _bulk_groups(result, data, utc_times, config, None)
+        return None
+    return accelerator
 
 
 def _empty_result(size, config):
@@ -579,7 +769,7 @@ def _group_gaps(result, group, utc_times):
     result["jf_session_boundary"][rows] = np.isfinite(wall_gaps) & (wall_gaps > selected_gaps + 1e-9)
 
 
-def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", session_schedule=None):
+def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", session_schedule=None, backend="auto"):
     """Return a copy with jf_* audit fields, preserving every source row and index.
 
     Naive timestamps use ``timezone``; numeric epochs and ambiguous DST times
@@ -598,6 +788,8 @@ def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spr
     if any(str(column).startswith("jf_") for column in frame.columns):
         raise ValueError("jf_ prefix is reserved; pass original source columns")
     ZoneInfo(timezone)
+    if backend not in ("auto", "python", "numba"):
+        raise ValueError("backend must be 'auto', 'python' or 'numba'")
 
     # Input: CUSIP=['001',None],time=['2026-01-01','bad'],spread=[100,inf] ->
     # Output: IDs=['001',<NA>],parsed=[2026-01-01 00:00 UTC,NaT],valid=[True,False].
@@ -605,7 +797,7 @@ def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spr
     # CORE LOGIC: STEP 1
     identifiers = frame[cusip_col].astype("string")
     numeric = pd.to_numeric(frame[spread_col], errors="coerce").to_numpy(dtype=float, na_value=np.nan)
-    parsed = pd.Series([_parse_time(value, timezone) for value in frame[time_col]], dtype="datetime64[ns, UTC]")
+    parsed = _parse_times(frame[time_col], timezone)
     valid = identifiers.notna().to_numpy() & identifiers.str.strip().ne("").fillna(False).to_numpy(dtype=bool)
     valid &= parsed.notna().to_numpy() & np.isfinite(numeric)
     result = _empty_result(len(frame), config)
@@ -630,16 +822,16 @@ def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spr
                              value=numeric, row=np.arange(len(frame))))
     data = data.loc[valid].sort_values(["id", "stamp", "row"], kind="stable")
     utc_times = parsed.astype("int64").to_numpy()
-    gap = pd.Timedelta(config.max_gap).value
+    accelerator = _resolve_backend(config.method, backend, len(data))
 
     # Input: A timestamps=[0,1,100],max_gap=10ns -> Output: segments [[0,1],[100]].
     # Trick: gaps reset both centered neighborhoods and causal state; CUSIPs never share references.
     # CORE LOGIC: STEP 4
-    for _, group in data.groupby("id", sort=False):
-        _group_gaps(result, group, utc_times)
-        segments = group["stamp"].diff().gt(gap).cumsum()
-        for _, segment in group.groupby(segments, sort=False):
-            _segment(result, segment, config)
+    if len(data):
+        if accelerator is None:
+            _bulk_groups(result, data, utc_times, config, None)
+        else:
+            accelerator = _compiled_groups(result, data, utc_times, config, accelerator, backend)
 
     # Input: statuses=['ok','outlier','insufficient_history','solver_not_converged'],
     # flags=[False,True,False,False] -> Output: fit_eligible=[True,False,False,False].
@@ -656,7 +848,8 @@ def filter_trades(frame, config=None, *, cusip_col="CUSIP", time_col="time", spr
     output.loc[~valid, "jf_clock_time"] = pd.NA
     output.attrs["jump_filter"] = dict(config=config.to_dict(), cusip_col=cusip_col,
                                       time_col=time_col, spread_col=spread_col, timezone=timezone,
-                                      future_observations=config.method != "causal_ewma", calendar=calendar)
+                                      future_observations=config.method != "causal_ewma", calendar=calendar,
+                                      backend="numba" if accelerator is not None else "python")
     return output
 
 

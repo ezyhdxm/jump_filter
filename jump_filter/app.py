@@ -8,8 +8,8 @@ import json
 import numpy as np
 import pandas as pd
 import streamlit as st
-from jump_filter import FilterConfig, METHODS, filter_trades, make_demo, summarize
-from jump_filter.dashboard import evaluation_summary, method_comparison, audit_tables, fitting_statistics
+from jump_filter import FilterConfig, METHODS, make_demo
+from jump_filter.dashboard import ReviewWorkspace, evaluation_summary, method_comparison, audit_tables
 from jump_filter.explanations import METHOD_HELP, METHOD_EXPLANATIONS, COMMON_STEPS, CLOCK_STEPS, FITTING_STEPS, PARAMETER_HELP, math_display_blocks
 from jump_filter.plots import METHOD_LABELS, trade_figure, diagnostic_figure, comparison_figure
 
@@ -134,14 +134,6 @@ def _column_index(columns, aliases, fallback):
     return next((matches[name.lower()] for name in aliases if name.lower() in matches), min(fallback, len(columns) - 1))
 
 
-def _select_bond(frame, cusip_col, value):
-    # Input: CUSIP=['A','B','A'], spread=[100,200,101], selected='A'.
-    # Output: CUSIP=['A','A'],spread=[100,101], in source order.
-    # Trick: Exact values preserve leading-zero strings; no string normalization or row-index joins are used.
-    # CORE LOGIC: STEP 1 — Select one bond for charts and method comparison.
-    return frame.loc[frame[cusip_col].eq(value)].copy()
-
-
 def _metrics(rows):
     # UI LOGIC: Counts distinguish algorithm evaluation from missing inputs and limited support.
     stats = evaluation_summary(rows)
@@ -178,23 +170,26 @@ def _table(frame, *, height="auto"):
 
 
 def _downloads(review, selected):
-    # FILE IO LOGIC: Downloads are generated from the successful applied snapshot, never pending settings.
+    # FILE IO LOGIC: Expensive CSV/standalone HTML files are serialized only after their individual prepare buttons are clicked.
     result, config, mapping = review["result"], review["config"], review["mapping"]
-    settings = dict(config=asdict(config), mapping=mapping, unit=review["unit"], rows=len(result),
-                    source_fingerprint=review["source_id"], source="applied result",
-                    calendar=result.attrs.get("jump_filter", {}).get("calendar"))
-    csv = result.to_csv(index=False).encode("utf-8")
-    summary_csv = summarize(result, cusip_col=mapping["cusip_col"]).to_csv(index=False).encode("utf-8")
-    figure = trade_figure(selected, cusip_col=mapping["cusip_col"], spread_col=mapping["spread_col"], unit=review["unit"], max_gap=config.max_gap)
-    columns = st.columns(4)
-    columns[0].download_button("Annotated trades CSV", csv, "annotated_trades.csv", "text/csv", width="stretch")
-    columns[1].download_button("Bond statistics CSV", summary_csv, "bond_summary.csv", "text/csv", width="stretch")
-    columns[2].download_button("Applied settings JSON", json.dumps(settings, indent=2), "settings.json", "application/json", width="stretch")
-    columns[3].download_button("Offline interactive chart", figure.to_html(include_plotlyjs=True), "selected_bond.html", "text/html", width="stretch")
-    extra = st.columns(2)
-    extra[0].download_button("Fitting coverage CSV", fitting_statistics(result, cusip_col=mapping["cusip_col"]).to_csv(index=False), "fitting_coverage.csv", "text/csv", width="stretch")
+    settings = dict(config=asdict(config), mapping=mapping, unit=review["unit"], rows=len(result), source_rows=len(review["data"]), review_scope=review["scope"],
+                    selected_cusip=str(review["bond"]), source_fingerprint=review["source_id"], source="applied result",
+                    calendar=result.attrs.get("jump_filter", {}).get("calendar"), chart_display=review.get("chart_metadata"))
+    files = [("Annotated trades CSV", "annotated_trades.csv", "text/csv", lambda: result.to_csv(index=False).encode("utf-8")),
+             ("Bond statistics CSV", "bond_summary.csv", "text/csv", lambda: review["summary"].to_csv(index=False).encode("utf-8")),
+             ("Applied settings JSON", "settings.json", "application/json", lambda: json.dumps(settings, indent=2)),
+             ("Fitting coverage CSV", "fitting_coverage.csv", "text/csv", lambda: review["fitting"].to_csv(index=False).encode("utf-8")),
+             ("Offline interactive chart", "selected_bond.html", "text/html", lambda: review["trade_chart"][1].to_html(include_plotlyjs=True))]
+    downloads = review.setdefault("downloads", {})
+    for column, (label, filename, mime, prepare) in zip(st.columns(5), files):
+        cache_key = (filename, review["bond"] if filename.endswith(".html") or filename == "settings.json" else None)
+        if column.button(f"Prepare {label.lower()}", key=f"jf_prepare_{filename}", width="stretch"):
+            with st.spinner(f"Preparing {label.lower()} for {len(result):,} reviewed rows…"):
+                downloads[cache_key] = prepare()
+        if cache_key in downloads:
+            column.download_button(label, downloads[cache_key], filename, mime, width="stretch")
     if review.get("session_schedule") is not None:
-        extra[1].download_button("Applied session schedule CSV", review["session_schedule"].to_csv(index=False), "session_schedule.csv", "text/csv", width="stretch")
+        st.download_button("Applied session schedule CSV", review["session_schedule"].to_csv(index=False), "session_schedule.csv", "text/csv")
 
 
 def main():
@@ -213,13 +208,18 @@ def main():
             st.info("Upload a CSV with CUSIP, timestamp and spread columns to begin.")
             return
         payload = uploaded.getvalue()
-        try:
-            data = pd.read_csv(BytesIO(payload), dtype="string")
-        except Exception as exc:
-            st.error(f"Could not read the CSV: {exc}")
-            return
         source_id = sha256(payload).hexdigest()
         source_label = uploaded.name
+        # CACHEING LOGIC: Parse one upload once per session; UI reruns reuse the immutable source rather than reading a million rows again.
+        loaded = st.session_state.get("jf_loaded_source")
+        if loaded is None or loaded[0] != source_id:
+            try:
+                loaded = (source_id, pd.read_csv(BytesIO(payload), dtype="string"))
+                st.session_state["jf_loaded_source"] = loaded
+            except Exception as exc:
+                st.error(f"Could not read the CSV: {exc}")
+                return
+        data = loaded[1]
     else:
         data, source_id, source_label = _demo("v2"), "synthetic-demo-v2-seed-42", "Synthetic demonstration v2 · not real trades"
     if len(data.columns) < 3 or data.columns.duplicated().any():
@@ -235,6 +235,16 @@ def main():
         zone = st.text_input("Timezone for naive timestamps", "UTC", help="Aware timestamps retain their actual instant. Naive timestamps are interpreted in this timezone.")
         unit = st.text_input("Spread unit label", "bp", help="Display label only. Convert spreads upstream if needed; no automatic scaling.")
     mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, timezone=zone)
+    # CACHEING LOGIC: Source and mapping identify a persistent bounded review cache and one positional CUSIP index.
+    workspace_key = (source_id, tuple(mapping.items()))
+    retained = st.session_state.get("jf_workspace")
+    if retained is None or retained[0] != workspace_key:
+        retained = (workspace_key, ReviewWorkspace(data, mapping))
+        st.session_state["jf_workspace"] = retained
+    workspace = retained[1]
+    selected_value = st.sidebar.selectbox("Bond / CUSIP", workspace.bonds, format_func=str, key=f"focus_{source_id}_{cusip_col}")
+    scope = st.sidebar.selectbox("Review population", ["selected", "all"], format_func=lambda value: "Selected bond · interactive" if value == "selected" else "All bonds · batch")
+    st.sidebar.caption(f"{len(data):,} source trades · {len(workspace.bonds):,} CUSIPs. Selected bond evaluates one instrument; All bonds explicitly runs the full population.")
     st.sidebar.markdown('<div class="jf-section-label">02 · Detection</div>', unsafe_allow_html=True)
     method = st.sidebar.selectbox("Method", METHODS, format_func=lambda name: METHOD_LABELS[name], index=list(METHODS).index("consensus"))
     st.sidebar.caption(METHOD_EXPLANATIONS[method]["mode"])
@@ -293,7 +303,7 @@ def main():
     with st.sidebar.container(key="jf-apply"):
         applied = st.button("Apply filter", type="primary", width="stretch")
         st.caption("Edits stay pending until you apply. Exports retain the applied settings.")
-    signature = dict(source_id=source_id, mapping=mapping, config=pending_config, unit=unit,
+    signature = dict(source_id=source_id, mapping=mapping, config=pending_config, unit=unit, scope=scope,
                      schedule_fingerprint=schedule_id, schedule_requested=use_schedule and time_basis == "trading")
     # UI LOGIC: A failed Apply leaves the last valid snapshot downloadable and visible.
     if applied:
@@ -302,12 +312,13 @@ def main():
                 raise ValueError(schedule_error)
             config = FilterConfig(**pending_config)
             with st.spinner("Evaluating trades and preparing the applied review…"):
-                result = filter_trades(data, config, **mapping, session_schedule=session_schedule)
-                preview_values = result[cusip_col].dropna().drop_duplicates()
-                preview = _select_bond(result, cusip_col, preview_values.iloc[0]) if len(preview_values) else result.iloc[:0]
-                trade_figure(preview, cusip_col=cusip_col, spread_col=spread_col, unit=unit, max_gap=config.max_gap)
-                review = dict(result=result, config=config, mapping=mapping, unit=unit, data=data.copy(),
-                              source_id=source_id, source_label=source_label, signature=signature)
+                record = workspace.review(config, scope=scope, bond=selected_value, session_schedule=session_schedule)
+                result = record["result"]
+                preview = result.iloc[:0] if selected_value is None else result.iloc[workspace.positions[selected_value]].copy() if scope == "all" else result
+                preview_chart = trade_figure(preview, cusip_col=cusip_col, spread_col=spread_col, unit=unit,
+                                             title=f'{selected_value} · {METHOD_LABELS[config.method]}', max_gap=config.max_gap)
+                review = dict(**record, config=config, mapping=mapping, unit=unit, data=data, workspace=workspace,
+                              source_id=source_id, source_label=source_label, signature=signature, downloads={}, trade_chart=(selected_value, preview_chart))
                 review["session_schedule"] = session_schedule.copy(deep=True) if session_schedule is not None else None
             st.session_state["jf_review"] = review
             st.session_state.pop("jf_comparison", None)
@@ -329,31 +340,54 @@ def main():
             _method_mathematics(method, pending_config)
         return
     # UI LOGIC: All panels use applied mappings and data, including after unsuccessful edits.
+    same_source = source_id == review["source_id"] and mapping == review["mapping"]
+    if same_source and selected_value is not None and selected_value != review["bond"]:
+        try:
+            if review["scope"] == "selected":
+                with st.spinner(f"Reviewing {selected_value} using the applied settings…"):
+                    record = review["workspace"].review(review["config"], bond=selected_value, session_schedule=review.get("session_schedule"))
+                    review = dict(review, **record, downloads={})
+                    st.session_state["jf_review"] = review
+            else:
+                review["bond"] = selected_value
+                # CACHEING LOGIC: Only the current bond's prepared chart/settings payloads remain; portfolio CSVs stay reusable.
+                review["downloads"] = {key: value for key, value in review.get("downloads", {}).items() if key[1] is None}
+            st.session_state.pop("jf_comparison", None)
+        except Exception as exc:
+            st.error(f"Could not review this bond: {exc}")
     result, applied_mapping = review["result"], review["mapping"]
     active_cusip, active_spread = applied_mapping["cusip_col"], applied_mapping["spread_col"]
-    st.markdown(f'<div class="jf-context"><span class="jf-pill">Applied review</span><strong>{escape(review["source_label"])}</strong><span class="jf-dot">·</span><span>{len(result):,} rows</span><span class="jf-dot">·</span><span>{escape(review["unit"])}</span></div>', unsafe_allow_html=True)
+    population_label = "All bonds (batch)" if review["scope"] == "all" else f'Selected bond {review["bond"]}'
+    st.markdown(f'<div class="jf-context"><span class="jf-pill">Applied review</span><strong>{escape(review["source_label"])}</strong><span class="jf-dot">·</span><span>{escape(population_label)}: {len(result):,} of {len(review["data"]):,} source rows</span><span class="jf-dot">·</span><span>{escape(review["unit"])}</span></div>', unsafe_allow_html=True)
     if signature != review["signature"]:
         st.warning("Pending changes. These results and downloads use the last successful Apply.")
     # UI LOGIC: Selector labels retain exact CUSIP values and do not hide sparse bonds.
-    choices = list(result[active_cusip].dropna().drop_duplicates())
+    choices = review["workspace"].bonds
     if not choices:
         st.error("No nonmissing CUSIPs are available. Download annotations to inspect invalid inputs.")
         st.dataframe(result, width="stretch", hide_index=True)
         _downloads(review, result.iloc[:0])
         return
-    bond_control, method_context = st.columns([1.15, 1], gap="large")
-    with bond_control:
-        selected_value = st.selectbox("Bond / CUSIP", choices, format_func=str, key=f'focus_{review["source_id"]}_{active_cusip}')
-    with method_context:
-        st.markdown(f'<div class="jf-method-context"><div class="jf-eyebrow">Applied method</div><strong>{escape(METHOD_LABELS[review["config"].method])}</strong><span>{escape(review["config"].time_basis.title())} clock · {escape(str(review["config"].horizon))} horizon · {escape(str(review["config"].window))} reference timestamps</span></div>', unsafe_allow_html=True)
-    selected = _select_bond(result, active_cusip, selected_value)
+    selected_value = review["bond"]
+    st.markdown(f'<div class="jf-method-context"><div class="jf-eyebrow">Applied method</div><strong>{escape(str(selected_value))} · {escape(METHOD_LABELS[review["config"].method])}</strong><span>{escape(review["config"].time_basis.title())} clock · {escape(str(review["config"].horizon))} horizon · {escape(str(review["config"].window))} reference timestamps</span></div>', unsafe_allow_html=True)
+    selected = result.iloc[review["workspace"].positions[selected_value]].copy() if review["scope"] == "all" else result
+    st.caption(f"Charts and headline counts: {selected_value}. Statistics and annotated exports: {population_label}.")
     _metrics(selected)
     trades_tab, statistics_tab, comparison_tab, math_tab, audit_tab = st.tabs(["Trade review", "Statistics", "Compare methods", "Method & mathematics", "Trade audit"])
     with trades_tab:
-        st.plotly_chart(trade_figure(selected, cusip_col=active_cusip, spread_col=active_spread, unit=review["unit"],
-                                    title=f'{selected_value} · {METHOD_LABELS[review["config"].method]}',
-                                    max_gap=review["config"].max_gap), width="stretch")
+        # CACHEING LOGIC: Pending parameter edits and table toggles reuse the current view's figures without rebuilding chart arrays.
+        cached_chart = review.get("trade_chart")
+        if cached_chart is None or cached_chart[0] != selected_value:
+            cached_chart = (selected_value, trade_figure(selected, cusip_col=active_cusip, spread_col=active_spread, unit=review["unit"],
+                                                       title=f'{selected_value} · {METHOD_LABELS[review["config"].method]}', max_gap=review["config"].max_gap))
+            review["trade_chart"] = cached_chart
+        figure = cached_chart[1]
+        review["chart_metadata"] = figure.layout.meta
+        st.plotly_chart(figure, width="stretch")
         st.caption("Hover a trade for its reason, score and local support. Red crosses mark outliers; amber symbols mark transitions. Original spreads are preserved.")
+        if figure.layout.meta.get("sampled"):
+            counts = figure.layout.meta
+            st.caption(f'Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports use every reviewed trade.')
         with st.expander("How to read this review"):
             st.write("The shaded band is the method's deviation cutoff around its diagnostic baseline. Empty markers are unscored records or ambiguous transitions; they are not automatically eligible for fitting. Session boundaries break the reference path.")
             st.write("Historical screening can use future trades. CUSIP, time and spread identify statistical deviations; they cannot establish retail origin, distress, markup or commission. The baseline is a diagnostic reference, not an observed market mid.")
@@ -361,15 +395,20 @@ def main():
         _method_mathematics(method, pending_config, review["config"].method)
     with statistics_tab:
         _section("Bond overview", "Flag rate uses evaluated trades; coverage uses every supplied row.")
-        summary = summarize(result, cusip_col=active_cusip)
+        summary = review["summary"]
         overview = [active_cusip, "rows", "evaluated", "flagged", "fit_eligible", "flagged_rate", "coverage"]
         _table(summary[overview])
         with st.expander("Full bond statistics"):
             _table(summary)
         _section("Fitting coverage and retention")
-        _table(fitting_statistics(result, cusip_col=active_cusip))
+        _table(review["fitting"])
         st.caption("Hard fit uses jf_fit_eligible (status ok and unflagged). Soft fit uses positive weights among status ok/outlier. Ambiguous transitions, provisional, invalid, unsupported and solver-failure records are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size or inverse variance.")
-        st.plotly_chart(diagnostic_figure(selected, spread_col=active_spread, unit=review["unit"]), width="stretch")
+        # CACHEING LOGIC: Keep only the current bond's diagnostic figure, rather than a chart for every source CUSIP.
+        cached_diagnostic = review.get("diagnostic_chart")
+        if cached_diagnostic is None or cached_diagnostic[0] != selected_value:
+            cached_diagnostic = (selected_value, diagnostic_figure(selected, spread_col=active_spread, unit=review["unit"]))
+            review["diagnostic_chart"] = cached_diagnostic
+        st.plotly_chart(cached_diagnostic[1], width="stretch")
         daily, reasons = st.columns(2)
         audits = audit_tables(selected)
         with daily:
@@ -382,7 +421,9 @@ def main():
         support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
                            "jf_reference_density_per_hour", "jf_scale", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary"]
         with st.expander("Local liquidity and uncertainty · per-trade diagnostics"):
-            _table(selected[[name for name in support_columns if name in selected]], height=350)
+            _table(selected[[name for name in support_columns if name in selected]].head(2000), height=350)
+            if len(selected) > 2000:
+                st.caption(f"Showing the first 2,000 of {len(selected):,} bond records. Annotated CSV retains the complete review.")
         st.caption("Density counts distinct timestamp cohorts per reference-span hour, using the applied distance clock. Local volatility is the method's diagnostic scale. Unsupported transitions remain explicit; high volatility or low liquidity is not itself an outlier label.")
     with comparison_tab:
         _section("Method sensitivity", "Compare all nine methods on this bond using the applied settings. A higher flag count does not establish better accuracy.")
@@ -390,7 +431,7 @@ def main():
         if st.button("Compare methods for this bond"):
             with st.spinner("Evaluating all methods on the selected bond…"):
                 try:
-                    table = method_comparison(_select_bond(review["data"], active_cusip, selected_value), review["config"], **applied_mapping,
+                    table = method_comparison(review["workspace"].source_bond(selected_value), review["config"], **applied_mapping,
                                                session_schedule=review.get("session_schedule"))
                     st.session_state["jf_comparison"] = (compare_key, table)
                 except Exception as exc:
@@ -409,9 +450,11 @@ def main():
                      "jf_baseline", "jf_residual", "jf_threshold", "jf_n_reference", "jf_weight", "jf_fit_eligible",
                      "jf_n_votes", "jf_n_scales", "jf_solver_iterations", "jf_solver_converged",
                      "jf_reference_density_per_hour", "jf_gap_minutes", "jf_wall_gap_minutes", "jf_session_boundary", "jf_row_id"]
-        _table(shown[[name for name in dict.fromkeys(preferred) if name in shown]], height=440)
+        _table(shown[[name for name in dict.fromkeys(preferred) if name in shown]].head(2000), height=440)
+        if len(shown) > 2000:
+            st.caption(f"Showing the first 2,000 of {len(shown):,} matching records. Download annotations for every reviewed row.")
     with st.expander("Export applied review · data, settings and standalone chart"):
-        st.caption("Every file uses the last successful Apply. The chart follows the selected bond; annotations retain all source rows.")
+        st.caption(f'Every file uses the applied settings. Annotations contain the explicit {review["scope"]} population: {len(result):,} of {len(review["data"]):,} source rows. Prepare each file only when needed; the chart follows the selected bond.')
         _downloads(review, selected)
 
 

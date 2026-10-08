@@ -1,6 +1,7 @@
 """Optional notebook workbench and reusable dashboard statistics."""
 # SETUP LOGIC: The notebook dependency is imported only when constructing a workbench.
 from dataclasses import asdict, replace
+from collections import OrderedDict
 from datetime import datetime, timezone
 from html import escape
 from hashlib import sha256
@@ -27,12 +28,19 @@ STYLE = """
 # Trick: Native outputs may render while detached or hidden; observe their real width after attachment and tab reveals.
 # Plotly's responsive handler recalculates axes and SVG geometry; no chart is visually stretched by CSS.
 _RESPONSIVE_WIDGET_ESM = """
-// PLOTTING LOGIC: Load the existing locally bundled module; every original model and event callback remains intact.
+// CACHEING LOGIC: Identical anywidget modules share one bundled import instead of reparsing Plotly for every chart.
+// Trick: Cache only the imported module; its default factory below creates separate model state for each figure.
+let bundledImport;
+const loadBundle = () => {
+  if (!bundledImport) {
+    const moduleUrl = URL.createObjectURL(new Blob([__PLOTLY_MODULE__], {type: "text/javascript"}));
+    bundledImport = import(moduleUrl).finally(() => URL.revokeObjectURL(moduleUrl));
+  }
+  return bundledImport;
+};
+// PLOTTING LOGIC: Each widget retains the original factory, initialize, render, and cleanup lifecycle.
 export default async () => {
-  const moduleUrl = URL.createObjectURL(new Blob([__PLOTLY_MODULE__], {type: "text/javascript"}));
-  let bundled;
-  try { bundled = await import(moduleUrl); }
-  finally { URL.revokeObjectURL(moduleUrl); }
+  const bundled = await loadBundle();
   const original = typeof bundled.default === "function" ? await bundled.default() : bundled.default;
   return {
     initialize(context) { return original.initialize?.(context); },
@@ -152,6 +160,68 @@ def audit_tables(annotated):
     return {"daily": daily, "reasons": reasons}
 
 
+class ReviewWorkspace:
+    """Index a fixed source once and retain a bounded cache of applied reviews.
+
+    ``selected`` evaluates one exact CUSIP; ``all`` explicitly evaluates every
+    source row, including missing CUSIPs. Cached frames are immutable snapshots
+    owned by the dashboard and retain global positional ``jf_row_id`` values.
+    """
+
+    def __init__(self, data, mapping, *, max_entries=16, max_bytes=64 * 1024 * 1024):
+        # SETUP LOGIC: One source reference and one positional index avoid full-frame copies on every UI event.
+        self.data, self.mapping = data, dict(mapping)
+        self.max_entries, self.max_bytes = max_entries, max_bytes
+        self.cache, self.cache_bytes = OrderedDict(), 0
+        # Input: CUSIP=['A','B','A'], source index=[7,7,2].
+        # Output: positions={'A':array([0,2]),'B':array([1])}; bonds=['A','B'].
+        # Trick: Positional indexing preserves duplicate source labels and leading-zero CUSIPs without repeatedly scanning all rows.
+        # CORE LOGIC: STEP 1 — Index the supplied instruments in their original encounter order.
+        self.positions = data.groupby(mapping["cusip_col"], sort=False, observed=True).indices
+        self.bonds = list(self.positions)
+
+    def source_bond(self, bond):
+        # Input: source CUSIP=['A','B','A'],spread=[100,200,101],positions['A']=[0,2].
+        # Output: CUSIP=['A','A'],spread=[100,101], with the original two index labels.
+        # Trick: iloc uses the one-time index; its small selected frame cannot mutate the retained source through dashboard code.
+        # CORE LOGIC: STEP 1 — Materialize only the requested instrument's source rows.
+        return self.data.iloc[self.positions[bond]].copy()
+
+    def review(self, config, *, scope="selected", bond=None, session_schedule=None):
+        # CACHEING LOGIC: Workspace identity fixes source and mapping; settings and calendar identify remaining dependencies.
+        from . import filter_trades, summarize
+        calendar = sha256(session_schedule.to_csv(index=False).encode()).hexdigest() if session_schedule is not None else None
+        key = (scope, bond if scope == "selected" else None, json.dumps(asdict(config), sort_keys=True, default=str), calendar)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        # VALIDATION LOGIC: An explicit population is required rather than silently interpreting an unknown scope.
+        if scope not in {"selected", "all"}:
+            raise ValueError("Review scope must be 'selected' or 'all'.")
+        if scope == "selected" and bond not in self.positions:
+            raise ValueError("Choose an available CUSIP before applying the selected-bond review.")
+        # Input: source positions=[0,1,2],CUSIP=['A','B','A'],scope='selected',bond='A'; local filter jf_row_id=[0,1].
+        # Output: result contains the two A rows, with jf_row_id=[0,2]; scope='all' instead retains jf_row_id=[0,1,2].
+        # Trick: The engine numbers its supplied population; remapping restores source-wide positional identities without index-label joins.
+        # CORE LOGIC: STEP 1 — Evaluate the explicitly chosen population and retain source row identities.
+        population = self.source_bond(bond) if scope == "selected" else self.data
+        result = filter_trades(population, config, **self.mapping, session_schedule=session_schedule)
+        if scope == "selected":
+            result["jf_row_id"] = self.positions[bond][result["jf_row_id"].to_numpy(dtype=int)]
+        summary = summarize(result, cusip_col=self.mapping["cusip_col"])
+        fitting = fitting_statistics(result, cusip_col=self.mapping["cusip_col"])
+        # CACHEING LOGIC: Large batch frames remain available as the applied result but are not duplicated in the bounded cache.
+        record = dict(result=result, summary=summary, fitting=fitting, scope=scope, bond=bond, key=key)
+        size = int(result.memory_usage(index=True, deep=True).sum() + summary.memory_usage(index=True, deep=True).sum() + fitting.memory_usage(index=True, deep=True).sum())
+        if size <= self.max_bytes and self.max_entries > 0:
+            while self.cache and (len(self.cache) >= self.max_entries or self.cache_bytes + size > self.max_bytes):
+                _, removed = self.cache.popitem(last=False)
+                self.cache_bytes -= removed["cache_bytes"]
+            record["cache_bytes"] = size
+            self.cache[key], self.cache_bytes = record, self.cache_bytes + size
+        return record
+
+
 def _table_html(frame, *, limit=200):
     # UI LOGIC: Format a bounded presentation copy with readable headers; complete raw values remain in exports.
     # Trick: Percentage strings belong only to this copy, so downstream fitting and exports retain numeric fractions.
@@ -212,6 +282,8 @@ class FilterDashboard:
     Install ``jump-filter[notebook]`` for a complete Notebook 7/JupyterLab 4 setup,
     or ``jump-filter[dashboard]`` inside an existing Jupyter kernel. No Streamlit
     process is required. A running kernel handles filtering and control callbacks.
+    ``result`` contains the applied population: the selected bond by default,
+    or every supplied row after choosing All bonds (batch) and applying.
     """
 
     def __init__(self, data, *, config=None, cusip_col="CUSIP", time_col="time", spread_col="spread", timezone="UTC", unit="bp", session_schedule=None):
@@ -223,6 +295,8 @@ class FilterDashboard:
         self.config = config or FilterConfig(time_basis="trading")
         self.mapping = dict(cusip_col=cusip_col, time_col=time_col, spread_col=spread_col, timezone=timezone)
         self.unit, self.result, self.applied_config = unit, None, None
+        self.applied_scope, self._applied_record = "selected", None
+        self._view_bond = None
         self.session_schedule = session_schedule.copy(deep=True) if session_schedule is not None else None
         self.applied_schedule = None
         self.comparison, self._applied_state, self.busy = None, None, False
@@ -233,8 +307,13 @@ class FilterDashboard:
         if not all(column in data for column in [cusip_col, time_col, spread_col]):
             raise ValueError("CUSIP, time and spread mappings must name existing columns.")
         # UI LOGIC: Exact values drive selection; text labels are presentation only.
-        values = list(data[cusip_col].dropna().drop_duplicates())
-        self.cusip = w.Dropdown(description="Bond / CUSIP", options=[(str(value), value) for value in values])
+        self.workspace = ReviewWorkspace(self.data, self.mapping)
+        values = self.workspace.bonds
+        initial_choices = values[:100] if len(values) > 250 else values
+        self.cusip = w.Dropdown(description="Bond / CUSIP", options=[(str(value), value) for value in initial_choices])
+        self.cusip_search = w.Text(description="Find CUSIP", placeholder="Type part of a CUSIP, then Enter", continuous_update=False)
+        self.cusip_matches = w.HTML()
+        self.scope = w.Dropdown(description="Review population", options=[("Selected bond · interactive", "selected"), ("All bonds · batch", "all")], value="selected")
         self.method = w.Dropdown(description="Detection method", options=[(METHOD_LABELS[name], name) for name in METHODS], value=self.config.method)
         self.help = w.HTML()
         self.pending, self.status, self.kpis = w.HTML(), w.HTML(), w.HTML()
@@ -282,12 +361,13 @@ class FilterDashboard:
         self.session_close = w.Text(value=self.config.session_close, description="Weekday session closes")
         self.holidays = w.Text(value=", ".join(self.config.holidays), description="Closed dates · YYYY-MM-DD, ...")
         self._calendar_controls = [self.time_basis, self.session_timezone, self.session_open, self.session_close, self.holidays]
-        self._controls = [self.method, self.horizon, self.max_gap, *self._calendar_controls, *self.params.values()]
-        for control in [self.cusip, self.method, self.horizon, self.max_gap, self.export_path, *self._calendar_controls]:
+        self._controls = [self.method, self.scope, self.horizon, self.max_gap, *self._calendar_controls, *self.params.values()]
+        for control in [self.cusip, self.cusip_search, self.scope, self.method, self.horizon, self.max_gap, self.export_path, *self._calendar_controls]:
             control.add_class("jf-control")
             control.style.description_width = "initial"
         # UI LOGIC: CUSIP selection changes the view only; parameter edits await explicit Apply.
         self.cusip.observe(self._focus_changed, names="value")
+        self.cusip_search.observe(self._search_bonds, names="value")
         self.method.observe(self._help_changed, names="value")
         for control in self._controls:
             control.observe(self._pending_changed, names="value")
@@ -307,7 +387,9 @@ class FilterDashboard:
         settings.set_title(1, "Trading calendar · sessions, closures and gaps")
         self.pending.add_class("jf-state-area")
         actions = self._row(self.apply_button, self.compare_button, self.pending).add_class("jf-actionbar")
-        selection = w.VBox([self._row(self.cusip, self.method), self.help]).add_class("jf-selection")
+        search = [self._row(self.cusip_search), self.cusip_matches] if len(values) > 250 else []
+        selection = w.VBox([*search, self._row(self.cusip, self.method, self.scope), self.help,
+                           w.HTML(f'<p class="jf-help">{len(self.data):,} source trades · {len(values):,} CUSIPs. Selected bond evaluates one instrument. All bonds explicitly runs the full population for portfolio statistics and exports.</p>')]).add_class("jf-selection")
         export_row = self._row(self.export_path, self.export_button).add_class("jf-export")
         self.widget = w.VBox([w.HTML("<style>" + STYLE + "</style>"), hero,
                               selection, actions, settings, self.status, self.kpis, self.tabs, note, export_row],
@@ -315,6 +397,16 @@ class FilterDashboard:
         self._empty_outputs()
         self._help_changed()
         self._pending_changed()
+
+    def _search_bonds(self, _=None):
+        # UI LOGIC: Search labels locally; retaining the current choice prevents search text from running a filter.
+        query, selected = self.cusip_search.value.casefold().strip(), self.cusip.value
+        matches = [bond for bond in self.workspace.bonds if query in str(bond).casefold()]
+        choices = matches[:100]
+        if selected is not None and selected not in choices:
+            choices.insert(0, selected)
+        self.cusip.options = [(str(bond), bond) for bond in choices]
+        self.cusip_matches.value = f'<p class="jf-help">{len(matches):,} matches · showing up to 100. Choose a CUSIP below; refine the search for more.</p>'
 
     def _row(self, *children):
         # UI LOGIC: Wrapping respects notebook pane width rather than browser viewport width.
@@ -425,7 +517,7 @@ class FilterDashboard:
     def _lock(self, busy):
         # UI LOGIC: Keep state fixed during computation and allow export only after a successful Apply.
         self.busy = busy
-        for control in [*self._controls, self.cusip, self.apply_button, self.compare_button]:
+        for control in [*self._controls, self.cusip, self.cusip_search, self.apply_button, self.compare_button]:
             control.disabled = busy
         self.export_button.disabled = busy or self.result is None
         self._help_changed()
@@ -435,29 +527,33 @@ class FilterDashboard:
         # Output: retained jf_row_id=[0,2], in source order.
         # Trick: Exact equality keeps string CUSIPs distinct from numeric IDs; original dataframe index labels are irrelevant.
         # CORE LOGIC: STEP 1 — Restrict display records to the exact selected instrument.
+        if frame is self.result and self.applied_scope == "all":
+            return frame.iloc[self.workspace.positions.get(self.cusip.value, np.array([], dtype=int))].copy()
         return frame.loc[frame[self.mapping["cusip_col"]].eq(self.cusip.value)].copy()
 
-    def _render(self, result):
+    def _render(self, record):
         # PLOTTING LOGIC: Native widget views use bundled Plotly assets, avoiding scripts inside sanitized HTML outputs.
         from .plots import trade_figure, diagnostic_figure, METHOD_LABELS
-        from . import summarize
-        selected = self._selected(result)
+        result = record["result"]
+        selected = result.iloc[self.workspace.positions.get(self.cusip.value, np.array([], dtype=int))].copy() if record["scope"] == "all" else result
         figure = trade_figure(selected, cusip_col=self.mapping["cusip_col"], spread_col=self.mapping["spread_col"],
                               unit=self.unit, max_gap=self.applied_config.max_gap if self.applied_config else "1D",
                               title=f'{self.cusip.value} · {METHOD_LABELS[self.applied_config.method] if self.applied_config else "Review"}')
         diagnostic = diagnostic_figure(selected, spread_col=self.mapping["spread_col"], unit=self.unit)
-        summary = summarize(result, cusip_col=self.mapping["cusip_col"])
-        return selected, _notebook_figure(figure), _notebook_figure(diagnostic), summary, fitting_statistics(result, cusip_col=self.mapping["cusip_col"])
+        return selected, _notebook_figure(figure), _notebook_figure(diagnostic), record["summary"], record["fitting"]
 
     def _publish(self, selected, figure, diagnostic, summary, fitting):
         # UI LOGIC: Replace output areas only after engine and plot construction both succeed.
         from IPython.display import HTML, display
-        self.kpis.value = _kpi_html(evaluation_summary(selected))
+        self.kpis.value = f'<p class="jf-help">Headline counts · selected bond {escape(str(self.cusip.value))}. Statistics and annotated exports · {"all bonds" if self.applied_scope == "all" else "selected bond"}.</p>' + _kpi_html(evaluation_summary(selected))
         with self.chart:
             self.chart.clear_output(wait=True)
             display(HTML('<div class="jf-section-heading"><h4>Spread history &amp; review flags</h4><span class="jf-help">Actual trade timestamps · UTC</span></div>'))
             display(figure)
-            display(HTML('<p class="jf-help">All timed finite trades are shown. Red crosses indicate statistical outliers; amber markers identify level changes or provisional jumps. Hover for scores, reference support and the reason for each decision.</p>'))
+            display(HTML('<p class="jf-help">Red crosses indicate statistical outliers; amber markers identify level changes or provisional jumps. Hover for scores, reference support and reasons.</p>'))
+            counts = figure.layout.meta or {}
+            if counts.get("sampled"):
+                display(HTML(f'<p class="jf-help">Chart displays {counts["displayed_trades"]:,} of {counts["total_timed_trades"]:,} timed trades and {counts["displayed_outliers"]:,} of {counts["total_outliers"]:,} flags. Display sampling prioritizes review markers; filtering, statistics and annotated exports retain every reviewed trade.</p>'))
         # UI LOGIC: Keep the liquidity chart immediately visible and progressively disclose the complete audit tables.
         audits = audit_tables(selected)
         support_columns = ["jf_time", "jf_status", "jf_n_reference", "jf_reference_span_minutes",
@@ -466,8 +562,9 @@ class FilterDashboard:
         overview = summary[[name for name in overview_columns if name in summary]]
         full_summary = ('<details class="jf-note"><summary>Full bond statistics · all diagnostic columns</summary>' +
                         _table_html(summary) + '</details>')
-        groups = [("All bonds · evaluation and fitting coverage", '<h4>Bond overview · applied method</h4>' + _table_html(overview) + full_summary +
-                   '<h4>All bonds · fitting coverage and retention</h4>' + _table_html(fitting) +
+        population = "All bonds" if self.applied_scope == "all" else "Selected bond"
+        groups = [(f"{population} · evaluation and fitting coverage", '<h4>Bond overview · applied method</h4>' + _table_html(overview) + full_summary +
+                   f'<h4>{population} · fitting coverage and retention</h4>' + _table_html(fitting) +
                    '<p class="jf-help">Hard fit: jf_fit_eligible / status ok and unflagged. Soft fit: status ok or outlier with positive suggested influence weight. Provisional jumps, ambiguous transitions, invalid inputs, unsupported rows and solver failures are excluded by default. Coverage includes all supplied rows; weight sum is not an effective sample size.</p>'),
                   ("Selected bond · daily support and decision reasons", '<h4>Observed daily support</h4>' + _table_html(audits["daily"]) +
                    '<h4>Flag and support reasons</h4>' + _table_html(audits["reasons"])),
@@ -500,28 +597,31 @@ class FilterDashboard:
             previous_widget.close()
 
     def run(self, _=None):
-        """Apply the settings to every supplied row and retain a successful snapshot."""
+        """Apply settings to the explicit review population and retain a successful snapshot."""
         # UI LOGIC: Failed pending changes preserve the previous valid result and export settings.
-        from . import filter_trades
         if self.busy:
             return self
         self._lock(True)
         self.status.value = '<div class="jf-status">Evaluating supplied trades…</div>'
-        previous = self.applied_config
+        previous = self.applied_config, self.applied_scope
         try:
             config = self._configuration()
             schedule = self.session_schedule.copy(deep=True) if self.session_schedule is not None else None
-            result = filter_trades(self.data, config, **self.mapping, session_schedule=schedule)
-            self.applied_config = config
-            rendered = self._render(result)
-            self._publish(*rendered)
-            self.result, self._applied_state, self.comparison = result, self._state(), None
+            record = self.workspace.review(config, scope=self.scope.value, bond=self.cusip.value, session_schedule=schedule)
+            self.applied_config, self.applied_scope = config, self.scope.value
+            if record is not self._applied_record or self.cusip.value != self._view_bond:
+                rendered = self._render(record)
+                self._publish(*rendered)
+            self.result, self._applied_state, self.comparison = record["result"], self._state(), None
+            self._applied_record = record
+            self._view_bond = self.cusip.value
             self.applied_schedule = schedule
             self.method_output.clear_output()
             self._clear_comparison_widget()
-            self.status.value = f'<div class="jf-status">Applied {escape(config.method)} to {len(result):,} supplied rows. Charts focus on {escape(str(self.cusip.value))}.</div>'
+            population = "All bonds (batch)" if self.applied_scope == "all" else f"Selected bond {self.cusip.value}"
+            self.status.value = f'<div class="jf-status">{escape(population)} · applied {escape(config.method)} to {len(self.result):,} of {len(self.data):,} source rows. Exports contain this review population.</div>'
         except Exception as exc:
-            self.applied_config = previous
+            self.applied_config, self.applied_scope = previous
             self.status.value = '<div class="jf-status jf-status-error">Could not apply settings: ' + escape(str(exc)) + '</div>'
         finally:
             self._lock(False)
@@ -529,14 +629,28 @@ class FilterDashboard:
         return self
 
     def _focus_changed(self, _=None):
-        # UI LOGIC: Reuse applied annotations when browsing bonds; no algorithm is rerun.
+        # UI LOGIC: First visits evaluate only this bond under the applied settings; revisits reuse bounded cached annotations.
         if self.result is None or self.busy:
             return
-        self._publish(*self._render(self.result))
-        self.status.value = f'<div class="jf-status">Viewing {escape(str(self.cusip.value))} · applied {escape(self.applied_config.method)} · {len(self.result):,} supplied rows.</div>'
-        self.comparison = None
-        self.method_output.clear_output()
-        self._clear_comparison_widget()
+        self._lock(True)
+        try:
+            record = self._applied_record if self.applied_scope == "all" else self.workspace.review(self.applied_config, bond=self.cusip.value, session_schedule=self.applied_schedule)
+            self._publish(*self._render(record))
+            self.result, self._applied_record = record["result"], record
+            self._view_bond = self.cusip.value
+            population = "all bonds" if self.applied_scope == "all" else "selected bond"
+            self.status.value = f'<div class="jf-status">Viewing {escape(str(self.cusip.value))} · applied {escape(self.applied_config.method)} · {population}: {len(self.result):,} of {len(self.data):,} source rows.</div>'
+            self.comparison = None
+            self.method_output.clear_output()
+            self._clear_comparison_widget()
+        except Exception as exc:
+            # UI LOGIC: A failed bond visit restores the published focus so later exports still match visible charts.
+            if self._view_bond is not None:
+                self.cusip.value = self._view_bond
+            self.status.value = '<div class="jf-status jf-status-error">Could not review this bond: ' + escape(str(exc)) + '</div>'
+        finally:
+            self._lock(False)
+            self._pending_changed()
 
     def _clear_comparison_widget(self):
         # UI LOGIC: Closed comparison models cannot retain stale applied settings in the notebook frontend.
@@ -553,7 +667,7 @@ class FilterDashboard:
             return
         self._lock(True)
         try:
-            table = method_comparison(self._selected(self.data), self.applied_config, **self.mapping, session_schedule=self.applied_schedule)
+            table = method_comparison(self.workspace.source_bond(self.cusip.value), self.applied_config, **self.mapping, session_schedule=self.applied_schedule)
             figure = _notebook_figure(comparison_figure(table))
             with self.method_output:
                 self.method_output.clear_output(wait=True)
@@ -572,7 +686,6 @@ class FilterDashboard:
     def export(self, _=None):
         """Save original-order annotations and the last successfully applied settings."""
         # FILE IO LOGIC: A timestamped folder keeps prior reviews; exports never use pending controls.
-        from . import summarize
         from .plots import trade_figure
         if self.result is None:
             return None
@@ -580,19 +693,20 @@ class FilterDashboard:
         try:
             output.mkdir(parents=True, exist_ok=False)
             self.result.to_csv(output / "annotated_trades.csv", index=False)
-            summarize(self.result, cusip_col=self.mapping["cusip_col"]).to_csv(output / "bond_summary.csv", index=False)
-            fitting_statistics(self.result, cusip_col=self.mapping["cusip_col"]).to_csv(output / "fitting_coverage.csv", index=False)
+            self._applied_record["summary"].to_csv(output / "bond_summary.csv", index=False)
+            self._applied_record["fitting"].to_csv(output / "fitting_coverage.csv", index=False)
             for name, table in audit_tables(self._selected(self.result)).items():
                 table.to_csv(output / f"selected_bond_{name}.csv", index=False)
             settings = dict(config=asdict(self.applied_config), mapping=self.mapping, unit=self.unit,
-                            selected_cusip=str(self.cusip.value), rows=len(self.result), source="applied result",
+                            selected_cusip=str(self.cusip.value), rows=len(self.result), source_rows=len(self.data), review_scope=self.applied_scope, source="applied result",
                             calendar=self.result.attrs.get("jump_filter", {}).get("calendar"))
             if self.applied_schedule is not None:
                 self.applied_schedule.to_csv(output / "session_schedule.csv", index=False)
-            (output / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
             figure = trade_figure(self._selected(self.result), cusip_col=self.mapping["cusip_col"],
                                   spread_col=self.mapping["spread_col"], unit=self.unit, title=str(self.cusip.value),
                                   max_gap=self.applied_config.max_gap)
+            settings["chart_display"] = figure.layout.meta
+            (output / "settings.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
             figure.write_html(output / "selected_bond.html", include_plotlyjs=True)
             if self.comparison is not None:
                 self.comparison.to_csv(output / "method_comparison.csv", index=False)

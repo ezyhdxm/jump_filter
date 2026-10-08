@@ -53,8 +53,13 @@ def test_streamlit_apply_controls_and_failed_apply_preserve_review():
     next(button for button in app.button if button.label == "Apply filter").click().run()
     assert not app.exception
     review = app.session_state["jf_review"]
-    assert len(review["result"]) == len(review["data"])
-    assert review["result"].index.equals(review["data"].index)
+    assert review["scope"] == "selected"
+    expected = review["data"].iloc[review["workspace"].positions[review["bond"]]]
+    assert len(review["result"]) == len(expected) < len(review["data"])
+    assert review["result"].index.equals(expected.index)
+    assert not app.get("download_button")
+    initial_result = review["result"]
+    initial_bond = review["bond"]
     assert len(app.metric) == 6
     assert len(app.get("plotly_chart")) >= 2
     assert len(app.dataframe) >= 4
@@ -63,7 +68,11 @@ def test_streamlit_apply_controls_and_failed_apply_preserve_review():
     focus = next(box for box in app.selectbox if box.label == "Bond / CUSIP")
     focus.set_value(focus.options[1]).run()
     assert not app.exception
-    assert app.session_state["jf_review"] is review
+    selected_review = app.session_state["jf_review"]
+    assert selected_review["result"] is not initial_result
+    assert selected_review["result"]["CUSIP"].eq(focus.value).all()
+    next(box for box in app.selectbox if box.label == "Bond / CUSIP").set_value(initial_bond).run()
+    assert app.session_state["jf_review"]["result"] is initial_result
     next(box for box in app.selectbox if box.label == "Method").set_value("hampel").run()
     assert app.session_state["jf_review"]["config"].method == "consensus"
     assert any("Pending changes" in warning.value for warning in app.warning)
@@ -85,6 +94,18 @@ def test_streamlit_apply_controls_and_failed_apply_preserve_review():
     assert app.session_state["jf_review"] is previous
     assert any("Could not apply" in error.value for error in app.error)
 
+    # TEST LOGIC: Explicit batch scope filters every source row; CSV serialization starts only after the requested prepare action.
+    app.number_input(key="jf_number_min_neighbors").set_value(6).run()
+    next(box for box in app.selectbox if box.label == "Review population").set_value("all").run()
+    next(button for button in app.button if button.label == "Apply filter").click().run()
+    batch = app.session_state["jf_review"]
+    assert batch["scope"] == "all"
+    assert batch["result"].index.equals(batch["data"].index)
+    assert not app.get("download_button")
+    next(button for button in app.button if button.label == "Prepare annotated trades csv").click().run()
+    assert any(button.label == "Annotated trades CSV" for button in app.get("download_button"))
+    assert ("annotated_trades.csv", None) in batch["downloads"]
+
     # TEST LOGIC: Explicit comparison uses the applied configuration and every supported method on one fixed bond.
     next(button for button in app.button if button.label == "Compare methods for this bond").click().run()
     assert not app.exception
@@ -92,4 +113,4 @@ def test_streamlit_apply_controls_and_failed_apply_preserve_review():
     from jump_filter import METHODS
     assert list(comparison["method"]) == list(METHODS)
     assert comparison["total"].nunique() == 1
-    assert app.session_state["jf_review"] is previous
+    assert app.session_state["jf_review"] is batch

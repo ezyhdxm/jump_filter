@@ -1,1 +1,1 @@
--e .[dashboard,app,parquet]
+-e .[dashboard,app,parquet,speed]

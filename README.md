@@ -8,7 +8,7 @@ The engine screens statistical deviations. These three columns cannot identify r
 
 ```bash
 # SETUP LOGIC: install the independent package and interactive extras.
-python -m pip install -e '.[dashboard,app,parquet]'
+python -m pip install -e '.[dashboard,app,parquet,speed]'
 # UI LOGIC: start the local browser dashboard.
 python -m streamlit run jump_filter/app.py
 ```
@@ -17,13 +17,15 @@ Open **jump_filter_dashboard.ipynb** for the notebook dashboard, or use the brow
 
 The workbench uses a compact light layout with six review metrics, method-specific tuning controls, and expandable statistics and mathematical details. Inactive parameters remain available but disabled. Charts share a consistent palette and distinguish outliers and transitions by marker shape as well as color; method comparisons use horizontal bars with readable names and explicit evaluation coverage. Notebook charts resize to their output pane, and the notebook marks settings as Ready, Applied or Pending so the displayed review remains easy to audit.
 
+Choose a CUSIP before Apply. **Selected bond · interactive** is the default review population, so tuning one bond does not screen the entire source dataset. First visits compute that bond with the applied settings; cached revisits reuse the result. Select **All bonds · batch** and Apply explicitly for portfolio statistics and complete-source annotations. Each table, export and settings file identifies the applied population. Browser downloads are prepared individually on request.
+
 ## Run inside Jupyter Notebook
 
 The notebook dashboard uses native `ipywidgets` controls and Plotly `FigureWidget` charts. It runs inside Jupyter Notebook 7 or JupyterLab 4, with no Streamlit server required. Install the notebook extra in the environment that will run both Jupyter and the kernel:
 
 ```bash
 # SETUP LOGIC: install the notebook frontend, kernel and native chart dependencies.
-python -m pip install -e '.[notebook]'
+python -m pip install -e '.[notebook,speed]'
 # SETUP LOGIC: register this environment without writing a separate user-level kernel.
 python -m ipykernel install --sys-prefix --name jump-filter --display-name "Jump Filter"
 # UI LOGIC: open the supplied dashboard notebook in Jupyter Notebook.
@@ -32,11 +34,23 @@ python -m notebook jump_filter_dashboard.ipynb
 
 Select the **Jump Filter** kernel and run all cells. For JupyterLab, use `python -m jupyterlab jump_filter_dashboard.ipynb` instead. The dashboard appears in a notebook output cell; CUSIP selection, method selection, sliders, exact inputs, Apply, comparison, mathematics, statistics and exports all work there.
 
-If you already have a notebook environment, run `%pip install -e '.[dashboard]'` from the repository directory **in that notebook**, restart its kernel and run all cells. `%pip` installs into the active kernel. If the frontend and kernel use different environments, install `jupyterlab_widgets` and `anywidget` in the frontend environment, and the dashboard extra in the kernel environment. The notebook extra includes all of these. Plotly 6 uses `anywidget` for native charts.
+If you already have a notebook environment, run `%pip install -e '.[dashboard,speed]'` from the repository directory **in that notebook**, restart its kernel and run all cells. `%pip` installs into the active kernel. If the frontend and kernel use different environments, install `jupyterlab_widgets` and `anywidget` in the frontend environment, and the dashboard and speed extras in the kernel environment. The notebook extra includes the frontend and kernel dependencies. Plotly 6 uses `anywidget` for native charts.
 
 Reopen the notebook and run all cells when starting a new session; live controls depend on a running kernel. Full standalone HTML charts remain available through Export for viewing without a kernel.
 
 The fresh-install browser check used Python 3.13, Notebook 7.6.3, JupyterLab 4.6.4, ipykernel 7.4.0, ipywidgets 8.1.9, anywidget 0.11.0 and Plotly 7.1.0. It verified bond/method selection, paired parameter controls, Apply, native charts, mathematical explanations and method comparison inside Notebook. The test suite also executes the supplied notebook in an actual Jupyter kernel.
+
+## Large portfolios
+
+Install the optional `speed` extra for native acceleration. `filter_trades(..., backend="auto")` uses Python for small reviews (fewer than 10,000 valid active rows), avoiding compiler startup while exploring a bond. Larger supported workloads use Numba when installed. `backend="python"` forces the reference implementation; `backend="numba"` forces acceleration for supported methods. The actual backend is recorded in `review.attrs["jump_filter"]["backend"]`.
+
+The accelerated methods are Hampel, local linear, jump/reversion, local piecewise and consensus. They share vectorized input preparation and one compiled call across all bonds and segments. Decisions near numerical cutoff boundaries are checked by the original regression solver. IQR, multiscale, Huber-TV and causal EWMA retain their Python algorithms with improved input/group preparation. These methods have different runtimes; a fast Hampel result does not establish the cost of every method. The first compiled batch can incur compilation, and later calls reuse the cache.
+
+The interactive workbench indexes the source once and keeps a bounded per-bond cache (16 entries, 64 MiB). `panel.result` is the applied population: one bond in interactive mode, or the full source in explicit batch mode. An active batch result remains available even when it exceeds the cache budget. Switching bonds retains the last applied method and calendar while pending edits remain unapplied.
+
+Charts have a 20,000-point display budget. Small bonds show every timed finite trade; larger bonds prioritize review markers and retain extrema from ordered event buckets. The caption reports displayed versus full rows and outliers, including when review markers themselves exceed the budget. Scoring, statistics and annotated exports use all records in the applied population. Histogram counts are aggregated from all finite residuals before sending a fixed-size payload to the frontend. Use `trade_figure(..., max_points=None)` when a complete interactive drawing is required.
+
+Use a timezone-aware datetime column for the fastest batch preparation. Object/string timestamps retain scalar validation for mixed offsets, naive timezone handling and DST ambiguity. Benchmark results use a three-column frame with typed UTC timestamps; CSV parsing, extra source columns, chart rendering and file exports have additional costs. See [measured million-trade benchmarks and reproducible commands](docs/PERFORMANCE.md).
 
 ## DataFrame API
 
@@ -133,7 +147,7 @@ All methods use a raw deviation boundary of at least `abs_floor`. Scores are sta
 
 `summarize` reports all source rows, evaluated and accepted counts, flags, invalid inputs, limited support, regime candidates, score statistics, flag rate and coverage. Flag rate divides by evaluated rows. Coverage divides by every row; missing support cannot inflate apparent accuracy.
 
-The dashboard exports full annotations, per-bond summaries, the exact applied settings and a standalone interactive HTML chart. No proprietary data are bundled or uploaded to a service. The repository demonstration is generated locally with a fixed seed.
+The dashboard exports complete annotations for the applied review population, per-bond summaries, the exact applied settings and a standalone interactive HTML chart. Settings identify the selected-bond or all-bonds scope. No proprietary data are bundled or uploaded to a service. The repository demonstration is generated locally with a fixed seed.
 
 ## CLI and validation
 

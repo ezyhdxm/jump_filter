@@ -19,6 +19,8 @@ def main():
     parser.add_argument("--spread-col", default="spread")
     parser.add_argument("--timezone", default="UTC")
     parser.add_argument("--method", choices=METHODS, default="consensus")
+    parser.add_argument("--backend", choices=("auto", "python", "numba"), default="auto",
+                        help="auto uses optional native acceleration for large supported workloads")
     parser.add_argument("--config", type=Path, help="JSON FilterConfig overrides")
     parser.add_argument("--summary", type=Path)
     parser.add_argument("--session-schedule", type=Path, help="CSV with aware open/close session boundaries")
@@ -41,7 +43,7 @@ def main():
     # CORE LOGIC: STEP 1
     annotated = filter_trades(frame, FilterConfig(**options), cusip_col=arguments.cusip_col,
                               time_col=arguments.time_col, spread_col=arguments.spread_col,
-                              timezone=arguments.timezone, session_schedule=schedule)
+                              timezone=arguments.timezone, session_schedule=schedule, backend=arguments.backend)
 
     # FILE IO LOGIC: serialize original-order annotations and optional per-bond counts.
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
