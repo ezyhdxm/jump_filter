@@ -17,17 +17,21 @@ METHOD_LABELS = {
 }
 
 
-def _style(figure, *, height=660):
+def _style(figure, *, height=660, trade=False):
     # PLOTTING LOGIC: Shared typography and white cards match both dashboard surfaces.
     figure.update_layout(
         template="plotly_white", height=height,
         font=dict(family="Inter, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif", color=INK),
-        paper_bgcolor="white", plot_bgcolor="white", margin=dict(l=65, r=28, t=65, b=45),
-        legend=dict(orientation="h", y=1.10, x=0, font=dict(size=11)),
+        paper_bgcolor="white", plot_bgcolor="white", margin=dict(l=65, r=28, t=160 if trade else 65, b=45),
+        legend=dict(orientation="h", y=1.20 if trade else 1.10, yanchor="top" if trade else "bottom",
+                    x=0, font=dict(size=11)),
         hovermode="closest", uirevision="jump-filter-chart",
     )
     figure.update_xaxes(showgrid=True, gridcolor="#eef2f6", zeroline=False)
     figure.update_yaxes(showgrid=True, gridcolor="#eef2f6", zeroline=False)
+    if trade:
+        # PLOTTING LOGIC: reserve space for wrapped legends in a narrow notebook/browser pane.
+        figure.update_layout(title=dict(y=.98, yanchor="top"))
     return figure
 
 
@@ -59,7 +63,7 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
         # PLOTTING LOGIC: Missing chart coordinates receive an explicit empty state.
         figure.add_annotation(text="No trades with a finite spread and usable timestamp", x=.5, y=.6,
                               xref="paper", yref="paper", showarrow=False)
-        return _style(figure)
+        return _style(figure, height=760, trade=True)
     # PLOTTING LOGIC: Exact source positions make hover identifiers safe with duplicate dataframe indexes.
     hover = np.column_stack([
         rows["jf_row_id"].astype(str), rows[cusip_col].astype(str), rows["jf_status"],
@@ -110,7 +114,7 @@ def trade_figure(annotated, *, cusip_col="CUSIP", spread_col="spread", unit="bp"
     figure.update_yaxes(title_text=f"Residual · {unit}", row=2, col=1)
     figure.update_xaxes(title_text="Time · UTC", row=2, col=1)
     figure.update_layout(title=dict(text=title or "Selected bond", font=dict(size=17), x=.02))
-    return _style(figure)
+    return _style(figure, height=760, trade=True)
 
 
 def diagnostic_figure(annotated, *, spread_col="spread", unit="bp"):
